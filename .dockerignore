@@ -1,0 +1,6 @@
+.git
+__pycache__
+*.pyc
+output/
+nifi/state/
+postgres_data/

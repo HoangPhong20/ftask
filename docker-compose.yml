@@ -1,0 +1,177 @@
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE}
+    container_name: nifi-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  nifi:
+    image: ${NIFI_IMAGE}
+    container_name: nifi
+    restart: unless-stopped
+    environment:
+      NIFI_WEB_HTTP_PORT: ${NIFI_WEB_HTTP_PORT}
+      NIFI_SENSITIVE_PROPS_KEY: ${NIFI_SENSITIVE_PROPS_KEY}
+    # 🔥 FIX QUAN TRỌNG
+    entrypoint: >
+      /bin/bash -c "
+      sed -i 's|nifi.sensitive.props.key=.*|nifi.sensitive.props.key=${NIFI_SENSITIVE_PROPS_KEY}|' /opt/nifi/nifi-current/conf/nifi.properties &&
+      /opt/nifi/scripts/start.sh
+      "
+    ports:
+      - "8080:8080"
+    volumes:
+      - nifi_state:/opt/nifi/nifi-current/state
+      - ./nifi/conf:/opt/nifi/nifi-current/conf
+      - nifi_content:/opt/nifi/nifi-current/content_repository
+      - nifi_db:/opt/nifi/nifi-current/database_repository
+      - nifi_flowfile:/opt/nifi/nifi-current/flowfile_repository
+      - nifi_provenance:/opt/nifi/nifi-current/provenance_repository
+      - ./input:/data/input
+      - ./output:/data/output
+
+  minio:
+    image: ${MINIO_IMAGE}
+    container_name: minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+
+  minio-init:
+    image: ${MINIO_MC_IMAGE}
+    container_name: minio-init
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD}; do sleep 2; done;
+      mc mb --ignore-existing local/${MINIO_BUCKET};
+      mc version enable local/${MINIO_BUCKET};
+      mc version info local/${MINIO_BUCKET};
+      mc cp /dev/null local/${MINIO_BUCKET}/raw/.keep || true;
+      mc cp /dev/null local/${MINIO_BUCKET}/processed/.keep || true;
+      mc cp /dev/null local/${MINIO_BUCKET}/curated/.keep || true;
+      mc anonymous set private local/${MINIO_BUCKET};
+      exit 0;
+      "
+
+  spark-master:
+    build:
+      context: .
+      dockerfile: docker/spark/Dockerfile
+      args:
+        SPARK_BASE_IMAGE: ${SPARK_BASE_IMAGE}
+    image: ${SPARK_IMAGE}
+    container_name: spark-master
+    restart: unless-stopped
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.master.Master
+      - --host
+      - spark-master
+      - --port
+      - "7077"
+      - --webui-port
+      - "8080"
+    ports:
+      - "7077:7077"
+      - "8081:8080"
+    environment:
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      SPARK_CLASSPATH: /opt/spark/jars/*
+      SPARK_SHUFFLE_PARTITIONS: ${SPARK_SHUFFLE_PARTITIONS}
+      SPARK_DEFAULT_PARALLELISM: ${SPARK_DEFAULT_PARALLELISM}
+      USE_BROADCAST_EMPLOYEE: ${USE_BROADCAST_EMPLOYEE}
+      MINIO_WRITE_MODE: ${MINIO_WRITE_MODE}
+      DWH_DIM_WRITE_MODE: ${DWH_DIM_WRITE_MODE}
+      DWH_FACT_WRITE_MODE: ${DWH_FACT_WRITE_MODE}
+      JDBC_BATCH_SIZE: ${JDBC_BATCH_SIZE}
+      JDBC_NUM_PARTITIONS: ${JDBC_NUM_PARTITIONS}
+      DIM_EMP_LOWER_BOUND: ${DIM_EMP_LOWER_BOUND}
+      DIM_EMP_UPPER_BOUND: ${DIM_EMP_UPPER_BOUND}
+      DIM_TIME_LOWER_BOUND: ${DIM_TIME_LOWER_BOUND}
+      DIM_TIME_UPPER_BOUND: ${DIM_TIME_UPPER_BOUND}
+      PG_JDBC_URL: ${PG_JDBC_URL}
+      PG_USER: ${PG_USER}
+      PG_PASSWORD: ${PG_PASSWORD}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      DATALAKE_BUCKET: ${DATALAKE_BUCKET}
+      SPARK_HADOOP_AWS_JAR: ${SPARK_HADOOP_AWS_JAR}
+      SPARK_AWS_SDK_BUNDLE_JAR: ${SPARK_AWS_SDK_BUNDLE_JAR}
+      SPARK_POSTGRES_JDBC_JAR: ${SPARK_POSTGRES_JDBC_JAR}
+    volumes:
+      - ./jars_spark:/opt/spark/jars-ext
+  spark-worker:
+    image: ${SPARK_IMAGE}
+    restart: unless-stopped
+    cpus: ${SPARK_WORKER_CORES}
+    mem_limit: ${SPARK_WORKER_MEMORY}
+    depends_on:
+      - spark-master
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.worker.Worker
+      - --cores
+      - "${SPARK_WORKER_CORES}"
+      - --memory
+      - "${SPARK_WORKER_MEMORY}"
+      - spark://spark-master:7077
+    environment:
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      SPARK_CLASSPATH: /opt/spark/jars/*
+      SPARK_SHUFFLE_PARTITIONS: ${SPARK_SHUFFLE_PARTITIONS}
+      SPARK_DEFAULT_PARALLELISM: ${SPARK_DEFAULT_PARALLELISM}
+    volumes:
+      - ./jars_spark:/opt/spark/jars-ext
+  metabase:
+    image: ${METABASE_IMAGE}
+    container_name: metabase
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      MB_DB_TYPE: postgres
+      MB_DB_DBNAME: ${POSTGRES_DB}
+      MB_DB_PORT: 5432
+      MB_DB_USER: ${POSTGRES_USER}
+      MB_DB_PASS: ${POSTGRES_PASSWORD}
+      MB_DB_HOST: postgres
+    ports:
+      - "3000:3000"
+    profiles:
+      - bi
+
+volumes:
+  postgres_data:
+  nifi_state:
+  nifi_conf:
+  nifi_content:
+  nifi_db:
+  nifi_flowfile:
+  nifi_provenance:
+  minio_data:

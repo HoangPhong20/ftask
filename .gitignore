@@ -1,0 +1,6 @@
+.env
+input/
+jars_spark/
+*.log
+spark/jars/*.jar
+nifi/drivers/*.jar
