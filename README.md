@@ -84,23 +84,27 @@ ListFile_all
       → PutS3Object_flexi
       → PutS3Object_icc
 ▶️ Cấu hình nhanh
-ListFile_all
+1. ListFile_all
 Input Directory: /data/input
 Recurse Subdirectories: true
 File Filter:
 ^frt_(flexi|in_icc)_export_.*\.csv$
-FetchFile_all
-File to Fetch:
+2. FetchFile_all
 ${absolute.path}${filename}
-RouteOnAttribute_csv
-is_flexi: ${filename:startsWith('frt_flexi_export_')}
-is_icc: ${filename:startsWith('frt_in_icc_export_')}
-PutS3Object
+3. RouteOnAttribute_csv
+
+is_flexi:
+
+${filename:startsWith('frt_flexi_export_')}
+
+is_icc:
+
+${filename:startsWith('frt_in_icc_export_')}
+4. PutS3Object
 Bucket: datalake
-Key:
 raw/${filename}
 Endpoint: http://minio:9000
-Path Style: true
+Use Path Style Access: true
 ▶️ Start order
 PutS3Object_flexi & icc
 RouteOnAttribute
@@ -177,4 +181,4 @@ Processing (Spark) ✔
 Warehouse (Postgres) ✔
 Visualization (Metabase) ✔
 
-👉 Đây là một kiến trúc data pipeline chuẩn mini data platform 🚀
+👉 Đây là một kiến trúc mini data platform hoàn chỉnh 🚀
