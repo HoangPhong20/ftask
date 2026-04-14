@@ -23,26 +23,17 @@ services:
     container_name: nifi
     restart: unless-stopped
     environment:
-      NIFI_WEB_HTTP_PORT: ${NIFI_WEB_HTTP_PORT}
-      NIFI_SENSITIVE_PROPS_KEY: ${NIFI_SENSITIVE_PROPS_KEY}
-    # 🔥 FIX QUAN TRỌNG
-    entrypoint: >
-      /bin/bash -c "
-      sed -i 's|nifi.sensitive.props.key=.*|nifi.sensitive.props.key=${NIFI_SENSITIVE_PROPS_KEY}|' /opt/nifi/nifi-current/conf/nifi.properties &&
-      /opt/nifi/scripts/start.sh
-      "
+      NIFI_WEB_HTTP_PORT: 8080
+      NIFI_JVM_HEAP_INIT: 4g
+      NIFI_JVM_HEAP_MAX: 8g
     ports:
       - "8080:8080"
     volumes:
-      - nifi_state:/opt/nifi/nifi-current/state
       - ./nifi/conf:/opt/nifi/nifi-current/conf
-      - nifi_content:/opt/nifi/nifi-current/content_repository
-      - nifi_db:/opt/nifi/nifi-current/database_repository
-      - nifi_flowfile:/opt/nifi/nifi-current/flowfile_repository
-      - nifi_provenance:/opt/nifi/nifi-current/provenance_repository
+      - ./nifi/flowfile:/opt/nifi/nifi-current/flowfile_repository
+      - ./nifi/database:/opt/nifi/nifi-current/database_repository
+      - ./nifi/state:/opt/nifi/nifi-current/state
       - ./input:/data/input
-      - ./output:/data/output
-
   minio:
     image: ${MINIO_IMAGE}
     container_name: minio
@@ -68,9 +59,6 @@ services:
       mc mb --ignore-existing local/${MINIO_BUCKET};
       mc version enable local/${MINIO_BUCKET};
       mc version info local/${MINIO_BUCKET};
-      mc cp /dev/null local/${MINIO_BUCKET}/raw/.keep || true;
-      mc cp /dev/null local/${MINIO_BUCKET}/processed/.keep || true;
-      mc cp /dev/null local/${MINIO_BUCKET}/curated/.keep || true;
       mc anonymous set private local/${MINIO_BUCKET};
       exit 0;
       "
@@ -84,6 +72,8 @@ services:
     image: ${SPARK_IMAGE}
     container_name: spark-master
     restart: unless-stopped
+    env_file:
+      - .env
     command:
       - /opt/spark/bin/spark-class
       - org.apache.spark.deploy.master.Master
@@ -101,7 +91,6 @@ services:
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
       SPARK_CLASSPATH: /opt/spark/jars/*
       SPARK_SHUFFLE_PARTITIONS: ${SPARK_SHUFFLE_PARTITIONS}
-      SPARK_DEFAULT_PARALLELISM: ${SPARK_DEFAULT_PARALLELISM}
       USE_BROADCAST_EMPLOYEE: ${USE_BROADCAST_EMPLOYEE}
       MINIO_WRITE_MODE: ${MINIO_WRITE_MODE}
       DWH_DIM_WRITE_MODE: ${DWH_DIM_WRITE_MODE}
@@ -131,6 +120,8 @@ services:
     mem_limit: ${SPARK_WORKER_MEMORY}
     depends_on:
       - spark-master
+    env_file:
+      - .env
     command:
       - /opt/spark/bin/spark-class
       - org.apache.spark.deploy.worker.Worker
@@ -144,9 +135,9 @@ services:
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
       SPARK_CLASSPATH: /opt/spark/jars/*
       SPARK_SHUFFLE_PARTITIONS: ${SPARK_SHUFFLE_PARTITIONS}
-      SPARK_DEFAULT_PARALLELISM: ${SPARK_DEFAULT_PARALLELISM}
     volumes:
       - ./jars_spark:/opt/spark/jars-ext
+
   metabase:
     image: ${METABASE_IMAGE}
     container_name: metabase
@@ -156,7 +147,7 @@ services:
         condition: service_healthy
     environment:
       MB_DB_TYPE: postgres
-      MB_DB_DBNAME: ${POSTGRES_DB}
+      MB_DB_DBNAME: metabase
       MB_DB_PORT: 5432
       MB_DB_USER: ${POSTGRES_USER}
       MB_DB_PASS: ${POSTGRES_PASSWORD}
@@ -170,8 +161,6 @@ volumes:
   postgres_data:
   nifi_state:
   nifi_conf:
-  nifi_content:
   nifi_db:
   nifi_flowfile:
-  nifi_provenance:
   minio_data:

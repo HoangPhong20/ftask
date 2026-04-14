@@ -1,15 +1,53 @@
-import os
+﻿import os
 import subprocess
 import sys
 import logging
+import time
+from collections import defaultdict
 from typing import List
 from pathlib import Path
+from datetime import datetime, timezone
+from contextlib import contextmanager
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)s %(name)s - %(message)s",
 )
 logger = logging.getLogger("run_spark_job")
+STAGE_TOTAL_SECONDS = defaultdict(float)
+STAGE_CALL_COUNT = defaultdict(int)
+
+
+@contextmanager
+def stage_timer(stage: str):
+    start_ts = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    start = time.perf_counter()
+    logger.info("[START] stage=%s ts=%s", stage, start_ts)
+    try:
+        yield
+    finally:
+        elapsed = time.perf_counter() - start
+        STAGE_TOTAL_SECONDS[stage] += elapsed
+        STAGE_CALL_COUNT[stage] += 1
+        end_ts = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+        logger.info("[END] stage=%s ts=%s elapsed_seconds=%.3f", stage, end_ts, elapsed)
+
+
+def log_stage_summary() -> None:
+    if not STAGE_TOTAL_SECONDS:
+        return
+
+    logger.info("========== Stage Runtime Summary ==========")
+    for stage, total in sorted(STAGE_TOTAL_SECONDS.items(), key=lambda x: x[1], reverse=True):
+        count = STAGE_CALL_COUNT[stage]
+        avg = total / count if count else 0.0
+        logger.info(
+            "stage=%s total_seconds=%.3f calls=%s avg_seconds=%.3f",
+            stage,
+            total,
+            count,
+            avg,
+        )
 
 
 def load_dotenv_file() -> dict[str, str]:
@@ -69,14 +107,30 @@ def build_spark_submit_command() -> List[str]:
         "docker",
         "compose",
         "exec",
+    ]
+
+    # Forward selected .env keys into the spark-master exec process.
+    for key in [
+        "RAW_FLEXI_PATH",
+        "RAW_ICC_PATH",
+        "DATALAKE_BUCKET",
+        "MINIO_WRITE_MODE",
+        "STG_WRITE_MODE",
+        "DWH_FACT_WRITE_MODE",
+    ]:
+        value = get_env(key, "")
+        if value:
+            cmd.extend(["-e", f"{key}={value}"])
+
+    cmd.extend([
         "spark-master",
         "/opt/spark/bin/spark-submit",
         "--master", master,
         "--deploy-mode", "client",
-        # 🔥 FIX CLASSLOADER (quan trọng nhất)
+        # Keep classpath explicit for driver/executor.
         "--conf", "spark.driver.extraClassPath=/opt/spark/jars/*",
         "--conf", "spark.executor.extraClassPath=/opt/spark/jars/*",
-    ]
+    ])
 
     # Add Hadoop configs
     for conf in hadoop_conf:
@@ -87,23 +141,23 @@ def build_spark_submit_command() -> List[str]:
         "--total-executor-cores", total_executor_cores,
         "--executor-cores", executor_cores,
         "--executor-memory", executor_memory,
-
         "--jars", jars_str,
-
         job_path,
     ])
 
     return cmd
 
 
-def run():
-    cmd = build_spark_submit_command()
+def main() -> int:
+    with stage_timer("build_spark_submit_command"):
+        cmd = build_spark_submit_command()
 
     logger.info("Running Spark job command")
     logger.info("%s", " ".join(cmd))
 
     try:
-        result = subprocess.run(cmd, check=False)
+        with stage_timer("spark_submit"):
+            result = subprocess.run(cmd, check=False)
     except Exception:
         logger.exception("Failed to execute spark-submit command")
         return 1
@@ -117,4 +171,8 @@ def run():
 
 
 if __name__ == "__main__":
-    sys.exit(run())
+    try:
+        exit_code = main()
+    finally:
+        log_stage_summary()
+    sys.exit(exit_code)
