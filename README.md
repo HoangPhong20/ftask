@@ -1,62 +1,37 @@
-🚀 How to Run the Project (End-to-End Data Pipeline)
+🚀 End-to-End Data Pipeline (NiFi → Spark → MinIO → PostgreSQL → Metabase)
 📌 Overview
-
-Pipeline xử lý dữ liệu theo luồng:
-
-CSV (local ./input)
+CSV (./input)
    ↓
 NiFi (ingest)
    ↓
-MinIO (raw layer)
+MinIO (raw)
    ↓
 Spark (transform)
    ↓
 MinIO (processed + curated)
    ↓
-PostgreSQL (data warehouse)
+PostgreSQL (warehouse)
    ↓
-Metabase (BI / dashboard)
-🧠 Why These Technologies?
-🔹 Apache NiFi
-Dùng để ingest dữ liệu từ file system
-Giao diện kéo-thả, dễ quan sát flow
-Hỗ trợ routing, retry, monitoring
-👉 Phù hợp cho pipeline ingest real-time / near real-time
-🔹 Apache Spark
-Xử lý dữ liệu lớn (distributed processing)
-Hỗ trợ tốt với Parquet, S3 (MinIO)
-Dễ mở rộng khi data tăng
-👉 Dùng cho transform + ETL logic
-🔹 MinIO (S3-compatible storage)
-Đóng vai trò data lake
-Lưu trữ theo layer:
-raw
-processed
-curated
-Tương thích S3 → Spark đọc trực tiếp
-👉 Thay thế AWS S3 trong môi trường local
-🔹 PostgreSQL
-Làm data warehouse (OLAP nhẹ)
-Lưu bảng fact/dimension
-Dễ query, join, tích hợp BI
-👉 Phù hợp cho demo + production nhỏ
-🔹 Metabase
-Công cụ BI nhẹ, dễ dùng
-Tạo dashboard nhanh
-Không cần code
-👉 Phục vụ visualize dữ liệu
-🐳 1. Start toàn bộ hệ thống
+Metabase (dashboard)
 
-Tại root project:
+🧠 Tech Stack & Rationale
+Tool	Purpose
+NiFi	Data ingestion, routing, monitoring
+Spark	Distributed data processing & ETL
+MinIO	S3-compatible data lake storage
+PostgreSQL	Data warehouse (fact/dimension)
+Metabase	Visualization & dashboard
 
+🐳 1. Start Services
 docker compose down
 docker compose up -d --build
 
-👉 Thời gian khởi động: ~1 phút
+⏱️ Wait ~1 minutes for all services to be ready.
 
-▶️ Nếu muốn chạy cả Metabase
+▶️ Run with Metabase
 docker compose --profile bi up -d --build
-🔍 2. Kiểm tra services
+
+🔍 2. Service Endpoints
 Service	URL
 NiFi	http://localhost:8080
 
@@ -66,119 +41,98 @@ Spark UI	http://localhost:8081
 
 Metabase	http://localhost:3000
 
-👉 Nếu vào được là OK
+📂 3. Prepare Input Data
 
-📂 3. Chuẩn bị dữ liệu đầu vào
-
-Copy file CSV vào:
+Put CSV files into:
 
 ./input
-Ví dụ:
+
+Example:
+
 frt_flexi_export_20260321.csv
 frt_in_icc_export_20260321.csv
-🌊 4. Chạy NiFi Flow (CSV → MinIO)
+
+🌊 4. NiFi Flow (CSV → MinIO)
 Flow
-ListFile_all 
-  → FetchFile_all 
-  → RouteOnAttribute_csv 
+ListFile_all
+  → FetchFile_all
+  → RouteOnAttribute_csv
       → PutS3Object_flexi
       → PutS3Object_icc
-▶️ Cấu hình nhanh
-1. ListFile_all
+
+Key Config
+
+ListFile_all
 Input Directory: /data/input
-Recurse Subdirectories: true
-File Filter:
+Recurse: true
 ^frt_(flexi|in_icc)_export_.*\.csv$
-2. FetchFile_all
+
+FetchFile_all
 ${absolute.path}${filename}
-3. RouteOnAttribute_csv
-
-is_flexi:
-
+RouteOnAttribute_csv
 ${filename:startsWith('frt_flexi_export_')}
-
-is_icc:
-
 ${filename:startsWith('frt_in_icc_export_')}
-4. PutS3Object
-Bucket: datalake
+
+PutS3Object
 raw/${filename}
+Bucket: datalake
 Endpoint: http://minio:9000
-Use Path Style Access: true
-▶️ Start order
-PutS3Object_flexi & icc
+Path Style: true
+
+▶️ Start Order
+PutS3Object
 RouteOnAttribute
 FetchFile
 ListFile
 
-👉 CSV sẽ được upload lên MinIO
+🧪 5. Validate RAW Data
 
-🧪 5. Validate dữ liệu RAW
-
-Vào:
+Open:
 
 👉 http://localhost:9001
 
-Kiểm tra:
+Check:
 
 datalake/raw/frt_flexi_export_*.csv
 datalake/raw/frt_in_icc_export_*.csv
-⚡ 6. Chạy Spark Job (Transform)
+
+⚡ 6. Run Spark Job
 docker exec -it spark-master spark-submit /opt/spark/jobs/transform.py
-🔍 Spark xử lý
-Đọc dữ liệu từ raw layer
-Transform:
-select columns
-normalize
-deduplicate
-Ghi ra:
-processed/
-curated/
-📊 7. Kiểm tra output
 
-Trong MinIO:
-
+📊 7. Check Output
 datalake/processed/frt_flexi_raw/
 datalake/processed/frt_icc_raw/
 datalake/curated/fact_usage_daily/
 
-👉 Nếu có file parquet → thành công
+👉 Presence of .parquet files = success
 
-🗄️ 8. Kiểm tra PostgreSQL
-
-Spark sẽ ghi vào:
-
+🗄️ 8. PostgreSQL Tables
 public.stg_frt_flexi_raw
 public.stg_frt_icc_raw
 public.fact_usage_daily
-📈 9. Mở Metabase (BI)
+
+📈 9. Metabase Dashboard
 
 👉 http://localhost:3000
 
-Kết nối DB:
+Connection settings:
+
 Host: postgres
 Port: 5432
-Database: postgres
+DB: postgres
 User: postgres
 
-👉 Tạo dashboard từ bảng fact_usage_daily
+🔁 10. Re-run Pipeline
 
-🔁 10. Chạy lại dữ liệu
-
-Nếu cần re-run:
+If NiFi does not reprocess files:
 
 Stop ListFile_all
 Clear state
 Empty queue
-Start lại
-🎯 Kết luận
-
-Pipeline hoàn chỉnh:
-
-Ingest (NiFi) ✔
-Storage (MinIO) ✔
-Processing (Spark) ✔
-Warehouse (Postgres) ✔
-Visualization (Metabase) ✔
-
-👉 Đây là một kiến trúc mini data platform hoàn chỉnh 🚀
+Start again
+🎯 Result
+✅ Data ingestion (NiFi)
+✅ Data lake storage (MinIO)
+✅ Data processing (Spark)
+✅ Data warehouse (PostgreSQL)
+✅ BI dashboard (Metabase)
