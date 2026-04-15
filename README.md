@@ -1,4 +1,4 @@
-# End-to-End Data Pipeline (NiFi -> Spark -> MinIO -> PostgreSQL -> Metabase)
+# End-to-End Data Pipeline (NiFi -> Spark -> MinIO -> PostgreSQL -> FastAPI)
 
 ## Overview
 
@@ -21,7 +21,7 @@ MinIO (processed + curated)
 PostgreSQL (warehouse)
    |
    v
-Metabase (dashboard)
+FastAPI (web/app endpoints)
 ```
 
 ## Tech Stack and Rationale
@@ -32,7 +32,7 @@ Metabase (dashboard)
 | Spark | Distributed data processing and ETL |
 | MinIO | S3-compatible data lake storage |
 | PostgreSQL | Data warehouse (fact/dimension) |
-| Metabase | Visualization and dashboard |
+| FastAPI | API layer for web/app clients |
 
 ## 1. Start Services
 
@@ -43,12 +43,6 @@ docker compose up -d --build
 
 Wait around 1 minute for all services to be ready.
 
-Run with Metabase profile:
-
-```bash
-docker compose --profile bi up -d --build
-```
-
 ## 2. Service Endpoints
 
 | Service | URL |
@@ -56,7 +50,8 @@ docker compose --profile bi up -d --build
 | NiFi | http://localhost:8080 |
 | MinIO | http://localhost:9001 |
 | Spark UI | http://localhost:8081 |
-| Metabase | http://localhost:3000 |
+| FastAPI | http://localhost:8000 |
+| FastAPI Docs | http://localhost:8000/docs |
 
 ## 3. Prepare Input Data
 
@@ -151,22 +146,24 @@ Presence of `.parquet` files means success.
 
 ```text
 public.stg_frt_flexi_raw
-public.stg_frt_icc_raw
-public.fact_usage_daily
+public.stg_frt_in_icc_raw
+dwh.fact_usage_daily
 ```
 
-## 9. Metabase Dashboard
+## 9. API Endpoints for Client (Web/App)
 
-Open:
+Core endpoints:
 
-`http://localhost:3000`
+- `GET /health`
+- `GET /api/v1/staging/flexi?limit=100`
+- `GET /api/v1/staging/icc?limit=100`
+- `GET /api/v1/usage/daily?date_from=YYYY-MM-DD&date_to=YYYY-MM-DD&call_type_code=VOICE`
 
-Connection settings:
+Optional (if you still need BI later):
 
-- Host: `postgres`
-- Port: `5432`
-- DB: `postgres`
-- User: `postgres`
+```bash
+docker compose --profile bi up -d --build
+```
 
 ## 10. Re-run Pipeline
 
@@ -183,4 +180,4 @@ If NiFi does not reprocess files:
 - Data lake storage (MinIO)
 - Data processing (Spark)
 - Data warehouse (PostgreSQL)
-- BI dashboard (Metabase)
+- API serving layer (FastAPI)
