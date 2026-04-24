@@ -3,10 +3,16 @@
 -- Spark writes full raw CSV to:
 --   public.stg_frt_flexi_raw
 --   public.stg_frt_in_icc_raw
--- and writes curated aggregate to:
+-- and writes curated aggregate (built from Flexi) to:
 --   dwh.dim_date
 --   dwh.dim_call_type
 --   dwh.fact_usage_daily
+--   dwh.usage_summary_daily
+--
+-- Mapping for dwh.fact_usage_daily from Flexi:
+--   usage_date           <- record_opening_time (parsed to DATE)
+--   call_type            <- record_type (normalized uppercase, UNKNOWN when blank)
+--   total_used_duration  <- duration
 
 CREATE SCHEMA IF NOT EXISTS dwh;
 
@@ -95,3 +101,53 @@ ON dwh.dim_call_type(call_type_code);
 
 CREATE INDEX IF NOT EXISTS idx_fact_usage_daily_date_type
 ON dwh.fact_usage_daily(date_key, call_type_key);
+
+CREATE TABLE IF NOT EXISTS dwh.usage_summary_daily (
+    usage_date DATE NOT NULL,
+    call_type_key BIGINT,
+    call_type_code VARCHAR(50) NOT NULL,
+    event_count BIGINT NOT NULL,
+    total_used_duration NUMERIC(18,2),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (usage_date, call_type_code)
+);
+
+DO $$
+BEGIN
+    IF to_regclass('public.stg_frt_flexi_raw') IS NOT NULL THEN
+        ALTER TABLE public.stg_frt_flexi_raw
+            ADD COLUMN IF NOT EXISTS year INTEGER,
+            ADD COLUMN IF NOT EXISTS month INTEGER,
+            ADD COLUMN IF NOT EXISTS day INTEGER;
+    END IF;
+END
+$$;
+
+DO $$
+BEGIN
+    IF to_regclass('public.stg_frt_in_icc_raw') IS NOT NULL THEN
+        ALTER TABLE public.stg_frt_in_icc_raw
+            ADD COLUMN IF NOT EXISTS year INTEGER,
+            ADD COLUMN IF NOT EXISTS month INTEGER,
+            ADD COLUMN IF NOT EXISTS day INTEGER;
+    END IF;
+END
+$$;
+
+DO $$
+BEGIN
+    IF to_regclass('public.stg_frt_flexi_raw') IS NOT NULL THEN
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_stg_flexi_ymd ON public.stg_frt_flexi_raw(year, month, day)';
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_flexi_ymd_ingested ON public.stg_frt_flexi_raw(year, month, day, _ingested_at DESC)';
+    END IF;
+END
+$$;
+
+DO $$
+BEGIN
+    IF to_regclass('public.stg_frt_in_icc_raw') IS NOT NULL THEN
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_stg_icc_ymd ON public.stg_frt_in_icc_raw(year, month, day)';
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_icc_ymd_ingested ON public.stg_frt_in_icc_raw(year, month, day, _ingested_at DESC)';
+    END IF;
+END
+$$;

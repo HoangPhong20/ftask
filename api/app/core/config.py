@@ -1,4 +1,4 @@
-﻿from functools import lru_cache
+from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     postgres_db: str = "postgres"
     postgres_user: str = "postgres"
     postgres_password: str = "123456"
+    dashboard_cache_ttl_seconds: int = 60
+    dashboard_cache_max_entries: int = 500
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -1,12 +1,7 @@
-﻿from datetime import date, datetime
+from datetime import date, datetime
 from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
-
-
-class HealthResponse(BaseModel):
-    status: str = Field(examples=["ok"])
-    database: str = Field(examples=["reachable"])
 
 
 class StagingFlexiOut(BaseModel):

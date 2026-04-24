@@ -1,183 +1,135 @@
-# End-to-End Data Pipeline (NiFi -> Spark -> MinIO -> PostgreSQL -> FastAPI)
+# Nifi Realtime Pipeline
+
+End-to-end analytics pipeline for ingesting CSV files with NiFi, transforming them with Spark, loading data into PostgreSQL, and serving dashboard APIs with FastAPI.
 
 ## Overview
 
 ```text
-CSV (./input)
-   |
-   v
-NiFi (ingest)
-   |
-   v
-MinIO (raw)
-   |
-   v
-Spark (transform)
-   |
-   v
-MinIO (processed + curated)
-   |
-   v
-PostgreSQL (warehouse)
-   |
-   v
-FastAPI (web/app endpoints)
+CSV -> NiFi -> MinIO -> Spark ETL -> PostgreSQL -> FastAPI -> Dashboard / Metabase
 ```
 
-## Tech Stack and Rationale
+The project is built to keep dashboard reads fast by using:
 
-| Tool | Purpose |
-|---|---|
-| NiFi | Data ingestion, routing, monitoring |
-| Spark | Distributed data processing and ETL |
-| MinIO | S3-compatible data lake storage |
-| PostgreSQL | Data warehouse (fact/dimension) |
-| FastAPI | API layer for web/app clients |
+- raw and staging layers
+- a DWH fact table for detail queries
+- a summary mart for dashboard cards and trend charts
+- short TTL cache in the API layer
 
-## 1. Start Services
+## NiFi Config
+
+NiFi is configured in `docker-compose.yml`.
+
+Key settings:
+
+- Web UI: `http://localhost:8080`
+- Flow config mount: `./nifi/conf -> /opt/nifi/nifi-current/conf`
+- FlowFile repository: `./nifi/flowfile`
+- Content repository: `./nifi/database`
+- State directory: `./nifi/state`
+- Input mount: `/mnt/d/data/Nifi-input -> /data/input`
+- Driver/JAR mount: `./jars_spark -> /opt/nifi/drivers:ro`
+
+Notes:
+
+- NiFi flow state is persisted in the mounted `nifi/` folders.
+- Source CSV files should be placed in `/mnt/d/data/Nifi-input`.
+- If you edit the flow in NiFi UI, the config is kept in `nifi/conf/flow.xml.gz`.
+
+## Main Tables
+
+```text
+public.ingest_manifest
+public.stg_frt_flexi_raw
+public.stg_frt_in_icc_raw
+dwh.dim_date
+dwh.dim_call_type
+dwh.fact_usage_daily
+dwh.usage_summary_daily
+```
+
+## API
+
+### Public
+
+- `GET /health`
+- `GET /api/usage/daily`
+- `GET /api/analytics/metrics/usage-summary`
+- `GET /api/analytics/metrics/usage-trend`
+
+### Internal
+
+- `GET /internal/staging/flexi`
+- `GET /internal/staging/icc`
+
+## Data Usage
+
+- `dwh.fact_usage_daily`: detail / drill-down
+- `dwh.usage_summary_daily`: dashboard summary / trend
+
+## Performance
+
+For summary range queries, keep this index:
+
+```sql
+CREATE INDEX IF NOT EXISTS idx_usage_summary_usage_date_call_type
+ON dwh.usage_summary_daily (usage_date, call_type_code);
+```
+
+The API also uses a short TTL in-memory cache for hot dashboard requests.
+
+## Project Layout
+
+```text
+api/                 FastAPI app
+spark/jobs/          Spark ETL job
+scripts/             Spark helper script
+postgres/init/       PostgreSQL init SQL
+docker-compose.yml   Local stack
+```
+
+## Run
+
+Use a terminal with Docker/Docker Compose installed. The services themselves run inside containers.
+
+Start all services:
 
 ```bash
-docker compose down
 docker compose up -d --build
 ```
 
-Wait around 1 minute for all services to be ready.
+Rebuild API only:
 
-## 2. Service Endpoints
+```bash
+docker compose up -d --build api
+```
+
+Run the Spark job directly inside the Spark container:
+
+```bash
+docker exec -it spark-master /opt/spark/bin/spark-submit --master spark://spark-master:7077 /opt/spark/jobs/transform.py
+```
+
+## URLs
 
 | Service | URL |
 |---|---|
 | NiFi | http://localhost:8080 |
-| MinIO | http://localhost:9001 |
+| MinIO Console | http://localhost:9001 |
 | Spark UI | http://localhost:8081 |
 | FastAPI | http://localhost:8000 |
 | FastAPI Docs | http://localhost:8000/docs |
+| Metabase | http://localhost:3000 |
 
-## 3. Prepare Input Data
+## Useful Commands
 
-Put CSV files into:
-
-```text
-./input
-```
-
-Example:
-
-```text
-frt_flexi_export_20260321.csv
-frt_in_icc_export_20260321.csv
-```
-
-## 4. NiFi Flow (CSV -> MinIO)
-
-Flow:
-
-```text
-ListFile_all
-  -> FetchFile_all
-  -> RouteOnAttribute_csv
-      -> PutS3Object_flexi
-      -> PutS3Object_icc
-```
-
-Key config:
-
-### ListFile_all
-
-- Input Directory: `/data/input`
-- Recurse: `true`
-- File Filter: `^frt_(flexi|in_icc)_export_.*\.csv$`
-
-### FetchFile_all
-
-- Path: `${absolute.path}${filename}`
-
-### RouteOnAttribute_csv
-
-- flexi: `${filename:startsWith('frt_flexi_export_')}`
-- icc: `${filename:startsWith('frt_in_icc_export_')}`
-
-### PutS3Object
-
-- Object Key: `raw/${filename}`
-- Bucket: `datalake`
-- Endpoint: `http://minio:9000`
-- Path Style Access: `true`
-
-Start order:
-
-```text
-PutS3Object
-RouteOnAttribute
-FetchFile
-ListFile
-```
-
-## 5. Validate RAW Data
-
-Open:
-
-`http://localhost:9001`
-
-Check:
-
-```text
-datalake/raw/frt_flexi_export_*.csv
-datalake/raw/frt_in_icc_export_*.csv
-```
-
-## 6. Run Spark Job
+Reset ingest flags:
 
 ```bash
-docker exec -it spark-master spark-submit /opt/spark/jobs/transform.py
+docker compose exec -T postgres psql -U postgres -d postgres -c "UPDATE public.ingest_manifest SET processed_flag=0, processed_time=NULL WHERE job_name='transform_usage_daily';"
 ```
 
-## 7. Check Output
-
-```text
-datalake/processed/frt_flexi_raw/
-datalake/processed/frt_icc_raw/
-datalake/curated/fact_usage_daily/
-```
-
-Presence of `.parquet` files means success.
-
-## 8. PostgreSQL Tables
-
-```text
-public.stg_frt_flexi_raw
-public.stg_frt_in_icc_raw
-dwh.fact_usage_daily
-```
-
-## 9. API Endpoints for Client (Web/App)
-
-Core endpoints:
-
-- `GET /health`
-- `GET /api/v1/staging/flexi?limit=100`
-- `GET /api/v1/staging/icc?limit=100`
-- `GET /api/v1/usage/daily?date_from=YYYY-MM-DD&date_to=YYYY-MM-DD&call_type_code=VOICE`
-
-Optional (if you still need BI later):
+Truncate staging and analytical tables:
 
 ```bash
-docker compose --profile bi up -d --build
+docker compose exec -T postgres psql -U postgres -d postgres -c "TRUNCATE TABLE public.stg_frt_flexi_raw, public.stg_frt_in_icc_raw, dwh.fact_usage_daily, dwh.usage_summary_daily;"
 ```
-
-## 10. Re-run Pipeline
-
-If NiFi does not reprocess files:
-
-1. Stop `ListFile_all`
-2. Clear state
-3. Empty queue
-4. Start again
-
-## Result
-
-- Data ingestion (NiFi)
-- Data lake storage (MinIO)
-- Data processing (Spark)
-- Data warehouse (PostgreSQL)
-- API serving layer (FastAPI)

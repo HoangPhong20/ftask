@@ -1,8 +1,5 @@
--- Create Metabase application database during first Postgres initialization.
--- This script only runs when the Postgres data volume is empty.
+-- Initialize Metabase database (idempotent).
 SELECT 'CREATE DATABASE metabase'
 WHERE NOT EXISTS (
-    SELECT 1
-    FROM pg_database
-    WHERE datname = 'metabase'
+    SELECT FROM pg_database WHERE datname = 'metabase'
 )\gexec

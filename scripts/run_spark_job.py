@@ -80,15 +80,16 @@ def build_spark_submit_command() -> List[str]:
     master = get_env("SPARK_MASTER_URL", "spark://spark-master:7077")
 
     # Resources
-    total_executor_cores = get_env("SPARK_TOTAL_EXECUTOR_CORES", "3")
-    executor_cores = get_env("SPARK_EXECUTOR_CORES", "1")
-    executor_memory = get_env("SPARK_EXECUTOR_MEMORY", "1g")
+    total_executor_cores = get_env("SPARK_TOTAL_EXECUTOR_CORES", "4")
+    executor_cores = get_env("SPARK_EXECUTOR_CORES", "2")
+    executor_memory = get_env("SPARK_EXECUTOR_MEMORY", "3g")
+    driver_memory = get_env("SPARK_DRIVER_MEMORY", "3g")
 
     # JAR paths
     jars = [
-        get_env("SPARK_HADOOP_AWS_JAR", "/opt/spark/jars/hadoop-aws-3.3.4.jar"),
-        get_env("SPARK_AWS_SDK_BUNDLE_JAR", "/opt/spark/jars/aws-java-sdk-bundle-1.12.262.jar"),
-        get_env("SPARK_POSTGRES_JDBC_JAR", "/opt/spark/jars/postgresql-42.7.4.jar"),
+        get_env("SPARK_HADOOP_AWS_JAR", "/opt/spark/jars-ext/hadoop-aws-3.3.4.jar"),
+        get_env("SPARK_AWS_SDK_BUNDLE_JAR", "/opt/spark/jars-ext/aws-java-sdk-bundle-1.12.262.jar"),
+        get_env("SPARK_POSTGRES_JDBC_JAR", "/opt/spark/jars-ext/postgresql-42.7.4.jar"),
     ]
 
     jars_str = ",".join(jars)
@@ -101,12 +102,23 @@ def build_spark_submit_command() -> List[str]:
         f"spark.hadoop.fs.s3a.secret.key={get_env('MINIO_SECRET_KEY', '12345678')}",
         "spark.hadoop.fs.s3a.path.style.access=true",
     ]
+    runtime_conf = [
+        f"spark.sql.shuffle.partitions={get_env('SPARK_SHUFFLE_PARTITIONS', '16')}",
+        f"spark.default.parallelism={get_env('SPARK_DEFAULT_PARALLELISM', '16')}",
+        f"spark.sql.files.maxPartitionBytes={get_env('SPARK_FILES_MAX_PARTITION_BYTES', '134217728')}",
+        f"spark.sql.files.openCostInBytes={get_env('SPARK_FILES_OPEN_COST_BYTES', '33554432')}",
+        f"spark.sql.adaptive.advisoryPartitionSizeInBytes={get_env('SPARK_ADVISORY_PARTITION_SIZE_BYTES', '134217728')}",
+        f"spark.sql.autoBroadcastJoinThreshold={get_env('SPARK_AUTO_BROADCAST_JOIN_THRESHOLD', '104857600')}",
+        f"spark.driver.maxResultSize={get_env('SPARK_DRIVER_MAX_RESULT_SIZE', '1g')}",
+        f"spark.executor.memoryOverhead={get_env('SPARK_EXECUTOR_MEMORY_OVERHEAD', '512')}",
+    ]
 
     # Build command
     cmd = [
         "docker",
         "compose",
         "exec",
+        "-T",
     ]
 
     # Forward selected .env keys into the spark-master exec process.
@@ -117,6 +129,20 @@ def build_spark_submit_command() -> List[str]:
         "MINIO_WRITE_MODE",
         "STG_WRITE_MODE",
         "DWH_FACT_WRITE_MODE",
+        "SPARK_SHUFFLE_PARTITIONS",
+        "SPARK_DEFAULT_PARALLELISM",
+        "SPARK_FILES_MAX_PARTITION_BYTES",
+        "SPARK_FILES_OPEN_COST_BYTES",
+        "SPARK_ADVISORY_PARTITION_SIZE_BYTES",
+        "SPARK_AUTO_BROADCAST_JOIN_THRESHOLD",
+        "SPARK_DRIVER_MAX_RESULT_SIZE",
+        "INGEST_MANIFEST_BATCH_SIZE",
+        "CURATED_FACT_OUTPUT_PARTITIONS",
+        "ENABLE_SALT_AGG",
+        "SALT_BUCKETS",
+        "CALL_TYPE_BROADCAST_THRESHOLD",
+        "JDBC_BATCH_SIZE",
+        "JDBC_NUM_PARTITIONS",
     ]:
         value = get_env(key, "")
         if value:
@@ -127,6 +153,7 @@ def build_spark_submit_command() -> List[str]:
         "/opt/spark/bin/spark-submit",
         "--master", master,
         "--deploy-mode", "client",
+        "--driver-memory", driver_memory,
         # Keep classpath explicit for driver/executor.
         "--conf", "spark.driver.extraClassPath=/opt/spark/jars/*",
         "--conf", "spark.executor.extraClassPath=/opt/spark/jars/*",
@@ -134,6 +161,8 @@ def build_spark_submit_command() -> List[str]:
 
     # Add Hadoop configs
     for conf in hadoop_conf:
+        cmd.extend(["--conf", conf])
+    for conf in runtime_conf:
         cmd.extend(["--conf", conf])
 
     # Add resources
@@ -157,7 +186,14 @@ def main() -> int:
 
     try:
         with stage_timer("spark_submit"):
-            result = subprocess.run(cmd, check=False)
+            result = subprocess.run(
+                cmd,
+                check=False,
+                stdout=sys.stdout,
+                stderr=sys.stderr,
+                text=True,
+                timeout=7200,
+            )
     except Exception:
         logger.exception("Failed to execute spark-submit command")
         return 1

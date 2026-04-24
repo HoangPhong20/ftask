@@ -3,6 +3,12 @@ services:
     image: ${POSTGRES_IMAGE}
     container_name: nifi-postgres
     restart: unless-stopped
+    command:
+      - postgres
+      - -c
+      - max_wal_size=4GB
+      - -c
+      - checkpoint_timeout=15min
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -33,7 +39,8 @@ services:
       - ./nifi/flowfile:/opt/nifi/nifi-current/flowfile_repository
       - ./nifi/database:/opt/nifi/nifi-current/database_repository
       - ./nifi/state:/opt/nifi/nifi-current/state
-      - ./input:/data/input
+      - /mnt/d/data/Nifi-input:/data/input # Mount local directory for Nifi input data
+      - ./jars_spark:/opt/nifi/drivers:ro
   minio:
     image: ${MINIO_IMAGE}
     container_name: minio
@@ -86,6 +93,7 @@ services:
     ports:
       - "7077:7077"
       - "8081:8080"
+      - "4040:4040"
     environment:
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
