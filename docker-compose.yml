@@ -19,10 +19,12 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./postgres/init:/docker-entrypoint-initdb.d
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 15
+    networks:
+      - data-platform
 
   nifi:
     image: ${NIFI_IMAGE}
@@ -30,8 +32,8 @@ services:
     restart: unless-stopped
     environment:
       NIFI_WEB_HTTP_PORT: 8080
-      NIFI_JVM_HEAP_INIT: 4g
-      NIFI_JVM_HEAP_MAX: 8g
+      NIFI_JVM_HEAP_INIT: 2g
+      NIFI_JVM_HEAP_MAX: 4g
     ports:
       - "8080:8080"
     volumes:
@@ -41,6 +43,8 @@ services:
       - ./nifi/state:/opt/nifi/nifi-current/state
       - /mnt/d/data/Nifi-input:/data/input # Mount local directory for Nifi input data
       - ./jars_spark:/opt/nifi/drivers:ro
+    networks:
+      - data-platform
   minio:
     image: ${MINIO_IMAGE}
     container_name: minio
@@ -54,6 +58,8 @@ services:
       - "9001:9001"
     volumes:
       - minio_data:/data
+    networks:
+      - data-platform
 
   minio-init:
     image: ${MINIO_MC_IMAGE}
@@ -62,13 +68,16 @@ services:
       - minio
     entrypoint: >
       /bin/sh -c "
-      until mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD}; do sleep 2; done;
+      sleep 2;
+      until (mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD} && mc ready local); do sleep 2; done;
       mc mb --ignore-existing local/${MINIO_BUCKET};
       mc version enable local/${MINIO_BUCKET};
       mc version info local/${MINIO_BUCKET};
       mc anonymous set private local/${MINIO_BUCKET};
       exit 0;
       "
+    networks:
+      - data-platform
 
   spark-master:
     build:
@@ -85,21 +94,20 @@ services:
       - /opt/spark/bin/spark-class
       - org.apache.spark.deploy.master.Master
       - --host
-      - spark-master
+      - 0.0.0.0
       - --port
       - "7077"
       - --webui-port
       - "8080"
     ports:
       - "7077:7077"
-      - "8081:8080"
+      - "8090:8080"
       - "4040:4040"
     environment:
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
-      SPARK_CLASSPATH: /opt/spark/jars/*
       SPARK_SHUFFLE_PARTITIONS: ${SPARK_SHUFFLE_PARTITIONS}
-      USE_BROADCAST_EMPLOYEE: ${USE_BROADCAST_EMPLOYEE}
+      CALL_TYPE_BROADCAST_THRESHOLD: ${CALL_TYPE_BROADCAST_THRESHOLD}
       MINIO_WRITE_MODE: ${MINIO_WRITE_MODE}
       DWH_DIM_WRITE_MODE: ${DWH_DIM_WRITE_MODE}
       DWH_FACT_WRITE_MODE: ${DWH_FACT_WRITE_MODE}
@@ -119,8 +127,12 @@ services:
       SPARK_HADOOP_AWS_JAR: ${SPARK_HADOOP_AWS_JAR}
       SPARK_AWS_SDK_BUNDLE_JAR: ${SPARK_AWS_SDK_BUNDLE_JAR}
       SPARK_POSTGRES_JDBC_JAR: ${SPARK_POSTGRES_JDBC_JAR}
+      PYTHONPATH: /opt/project
     volumes:
+      - ./spark:/opt/project/spark
       - ./jars_spark:/opt/spark/jars-ext
+    networks:
+      - data-platform
   spark-worker:
     image: ${SPARK_IMAGE}
     restart: unless-stopped
@@ -137,14 +149,21 @@ services:
       - "${SPARK_WORKER_CORES}"
       - --memory
       - "${SPARK_WORKER_MEMORY}"
+      - --webui-port
+      - "8081"
       - spark://spark-master:7077
+    ports:
+      - "8082:8081"
     environment:
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
-      SPARK_CLASSPATH: /opt/spark/jars/*
       SPARK_SHUFFLE_PARTITIONS: ${SPARK_SHUFFLE_PARTITIONS}
+      PYTHONPATH: /opt/project
     volumes:
+      - ./spark:/opt/project/spark
       - ./jars_spark:/opt/spark/jars-ext
+    networks:
+      - data-platform
 
   api:
     build:
@@ -163,6 +182,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     ports:
       - "8000:8000"
+    networks:
+      - data-platform
 
   metabase:
     image: ${METABASE_IMAGE}
@@ -182,11 +203,12 @@ services:
       - "3000:3000"
     profiles:
       - bi
+    networks:
+      - data-platform
 
 volumes:
   postgres_data:
-  nifi_state:
-  nifi_conf:
-  nifi_db:
-  nifi_flowfile:
   minio_data:
+
+networks:
+  data-platform:

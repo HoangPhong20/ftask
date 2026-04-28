@@ -76,7 +76,7 @@ def get_env(name: str, default: str) -> str:
 
 def build_spark_submit_command() -> List[str]:
     # Core config
-    job_path = get_env("SPARK_JOB_PATH", "/opt/spark/jobs/transform.py")
+    job_path = get_env("SPARK_JOB_PATH", "/opt/project/spark/jobs/transform.py")
     master = get_env("SPARK_MASTER_URL", "spark://spark-master:7077")
 
     # Resources
@@ -84,34 +84,8 @@ def build_spark_submit_command() -> List[str]:
     executor_cores = get_env("SPARK_EXECUTOR_CORES", "2")
     executor_memory = get_env("SPARK_EXECUTOR_MEMORY", "3g")
     driver_memory = get_env("SPARK_DRIVER_MEMORY", "3g")
-
-    # JAR paths
-    jars = [
-        get_env("SPARK_HADOOP_AWS_JAR", "/opt/spark/jars-ext/hadoop-aws-3.3.4.jar"),
-        get_env("SPARK_AWS_SDK_BUNDLE_JAR", "/opt/spark/jars-ext/aws-java-sdk-bundle-1.12.262.jar"),
-        get_env("SPARK_POSTGRES_JDBC_JAR", "/opt/spark/jars-ext/postgresql-42.7.4.jar"),
-    ]
-
-    jars_str = ",".join(jars)
-
-    # Hadoop S3 config (MinIO)
-    hadoop_conf = [
-        "spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem",
-        f"spark.hadoop.fs.s3a.endpoint={get_env('MINIO_ENDPOINT', 'http://minio:9000')}",
-        f"spark.hadoop.fs.s3a.access.key={get_env('MINIO_ACCESS_KEY', 'minioadmin')}",
-        f"spark.hadoop.fs.s3a.secret.key={get_env('MINIO_SECRET_KEY', '12345678')}",
-        "spark.hadoop.fs.s3a.path.style.access=true",
-    ]
-    runtime_conf = [
-        f"spark.sql.shuffle.partitions={get_env('SPARK_SHUFFLE_PARTITIONS', '16')}",
-        f"spark.default.parallelism={get_env('SPARK_DEFAULT_PARALLELISM', '16')}",
-        f"spark.sql.files.maxPartitionBytes={get_env('SPARK_FILES_MAX_PARTITION_BYTES', '134217728')}",
-        f"spark.sql.files.openCostInBytes={get_env('SPARK_FILES_OPEN_COST_BYTES', '33554432')}",
-        f"spark.sql.adaptive.advisoryPartitionSizeInBytes={get_env('SPARK_ADVISORY_PARTITION_SIZE_BYTES', '134217728')}",
-        f"spark.sql.autoBroadcastJoinThreshold={get_env('SPARK_AUTO_BROADCAST_JOIN_THRESHOLD', '104857600')}",
-        f"spark.driver.maxResultSize={get_env('SPARK_DRIVER_MAX_RESULT_SIZE', '1g')}",
-        f"spark.executor.memoryOverhead={get_env('SPARK_EXECUTOR_MEMORY_OVERHEAD', '512')}",
-    ]
+    executor_memory_overhead = get_env("SPARK_EXECUTOR_MEMORY_OVERHEAD", "512")
+    app_name = get_env("SPARK_APP_NAME", "nifi-transform-usage-daily")
 
     # Build command
     cmd = [
@@ -123,8 +97,12 @@ def build_spark_submit_command() -> List[str]:
 
     # Forward selected .env keys into the spark-master exec process.
     for key in [
-        "RAW_FLEXI_PATH",
-        "RAW_ICC_PATH",
+        "PG_JDBC_URL",
+        "PG_USER",
+        "PG_PASSWORD",
+        "MINIO_ENDPOINT",
+        "MINIO_ACCESS_KEY",
+        "MINIO_SECRET_KEY",
         "DATALAKE_BUCKET",
         "MINIO_WRITE_MODE",
         "STG_WRITE_MODE",
@@ -136,13 +114,17 @@ def build_spark_submit_command() -> List[str]:
         "SPARK_ADVISORY_PARTITION_SIZE_BYTES",
         "SPARK_AUTO_BROADCAST_JOIN_THRESHOLD",
         "SPARK_DRIVER_MAX_RESULT_SIZE",
+        "INGEST_MANIFEST_JOB_NAME",
         "INGEST_MANIFEST_BATCH_SIZE",
         "CURATED_FACT_OUTPUT_PARTITIONS",
+        "PROCESSED_OUTPUT_PARTITIONS",
         "ENABLE_SALT_AGG",
         "SALT_BUCKETS",
         "CALL_TYPE_BROADCAST_THRESHOLD",
         "JDBC_BATCH_SIZE",
         "JDBC_NUM_PARTITIONS",
+        "JDBC_WRITE_MAX_RETRIES",
+        "JDBC_WRITE_RETRY_SLEEP_SECONDS",
     ]:
         value = get_env(key, "")
         if value:
@@ -150,31 +132,40 @@ def build_spark_submit_command() -> List[str]:
 
     cmd.extend([
         "spark-master",
-        "/opt/spark/bin/spark-submit",
+        "spark-submit",
         "--master", master,
         "--deploy-mode", "client",
+        "--name", app_name,
         "--driver-memory", driver_memory,
-        # Keep classpath explicit for driver/executor.
-        "--conf", "spark.driver.extraClassPath=/opt/spark/jars/*",
-        "--conf", "spark.executor.extraClassPath=/opt/spark/jars/*",
+        "--conf", f"spark.executor.memoryOverhead={executor_memory_overhead}",
+        "--conf", f"spark.sql.shuffle.partitions={get_env('SPARK_SHUFFLE_PARTITIONS', '16')}",
+        "--conf", f"spark.default.parallelism={get_env('SPARK_DEFAULT_PARALLELISM', '16')}",
     ])
-
-    # Add Hadoop configs
-    for conf in hadoop_conf:
-        cmd.extend(["--conf", conf])
-    for conf in runtime_conf:
-        cmd.extend(["--conf", conf])
 
     # Add resources
     cmd.extend([
         "--total-executor-cores", total_executor_cores,
         "--executor-cores", executor_cores,
         "--executor-memory", executor_memory,
-        "--jars", jars_str,
         job_path,
     ])
 
     return cmd
+
+
+def redact_command_for_logging(cmd: List[str]) -> List[str]:
+    redacted: List[str] = []
+    secret_tokens = ("PASSWORD", "SECRET", "TOKEN", "KEY")
+    for token in cmd:
+        if any(marker in token.upper() for marker in secret_tokens):
+            if "=" in token:
+                key = token.split("=", 1)[0]
+                redacted.append(f"{key}=***")
+            else:
+                redacted.append("***")
+        else:
+            redacted.append(token)
+    return redacted
 
 
 def main() -> int:
@@ -182,24 +173,44 @@ def main() -> int:
         cmd = build_spark_submit_command()
 
     logger.info("Running Spark job command")
-    logger.info("%s", " ".join(cmd))
+    logger.info("%s", " ".join(redact_command_for_logging(cmd)))
 
-    try:
-        with stage_timer("spark_submit"):
-            result = subprocess.run(
-                cmd,
-                check=False,
-                stdout=sys.stdout,
-                stderr=sys.stderr,
-                text=True,
-                timeout=7200,
-            )
-    except Exception:
-        logger.exception("Failed to execute spark-submit command")
+    max_retries = max(int(get_env("SPARK_SUBMIT_MAX_RETRIES", "3")), 1)
+    retry_sleep_seconds = max(int(get_env("SPARK_SUBMIT_RETRY_SLEEP_SECONDS", "10")), 0)
+    timeout_seconds = max(int(get_env("SPARK_JOB_TIMEOUT", "10800")), 1)
+    result = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            with stage_timer(f"spark_submit_attempt_{attempt}"):
+                result = subprocess.run(
+                    cmd,
+                    check=False,
+                    stdout=sys.stdout,
+                    stderr=sys.stderr,
+                    text=True,
+                    timeout=timeout_seconds,
+                )
+        except Exception:
+            logger.exception("Failed to execute spark-submit command (attempt %s/%s)", attempt, max_retries)
+            if attempt < max_retries:
+                time.sleep(retry_sleep_seconds)
+                continue
+            return 1
+
+        if result.returncode == 0:
+            break
+
+        logger.warning("Spark failed (attempt %s/%s) with return code %s", attempt, max_retries, result.returncode)
+        if attempt < max_retries:
+            time.sleep(retry_sleep_seconds)
+
+    if result is None:
+        logger.error("Spark job did not start")
         return 1
-
     if result.returncode != 0:
         logger.error("Spark job failed with return code %s", result.returncode)
+        logger.error("Check Spark logs above for root cause")
     else:
         logger.info("Spark job completed successfully")
 

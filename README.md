@@ -1,39 +1,88 @@
 # Nifi Realtime Pipeline
 
-End-to-end analytics pipeline for ingesting CSV files with NiFi, transforming them with Spark, loading data into PostgreSQL, and serving dashboard APIs with FastAPI.
+End-to-end pipeline for CSV ingestion with NiFi, transformation with Spark, warehouse loading in PostgreSQL, and serving metrics through FastAPI.
 
-## Overview
+## Architecture
 
 ```text
-CSV -> NiFi -> MinIO -> Spark ETL -> PostgreSQL -> FastAPI -> Dashboard / Metabase
+CSV -> NiFi -> MinIO -> Spark ETL -> PostgreSQL -> FastAPI -> Dashboard/Metabase
 ```
 
-The project is built to keep dashboard reads fast by using:
+## Project Structure
 
-- raw and staging layers
-- a DWH fact table for detail queries
-- a summary mart for dashboard cards and trend charts
-- short TTL cache in the API layer
+```text
+api/                 FastAPI app
+spark/jobs/          Spark ETL job (mounted into Spark containers)
+scripts/             Helper scripts (including Spark runner)
+postgres/init/       PostgreSQL bootstrap SQL
+docker-compose.yml   Local stack
+```
 
-## NiFi Config
+## Prerequisites
 
-NiFi is configured in `docker-compose.yml`.
+- Docker + Docker Compose v2
+- A valid `.env` file in repo root
+- Input CSV files available for NiFi at `/mnt/d/data/Nifi-input` (host path used by compose)
 
-Key settings:
+## Start The Stack
 
-- Web UI: `http://localhost:8080`
-- Flow config mount: `./nifi/conf -> /opt/nifi/nifi-current/conf`
-- FlowFile repository: `./nifi/flowfile`
-- Content repository: `./nifi/database`
-- State directory: `./nifi/state`
-- Input mount: `/mnt/d/data/Nifi-input -> /data/input`
-- Driver/JAR mount: `./jars_spark -> /opt/nifi/drivers:ro`
+Run from repository root:
+
+```bash
+docker compose up -d --build
+```
+
+Check status:
+
+```bash
+docker compose ps
+```
+
+When you update only one service:
+
+```bash
+docker compose up -d --build api
+docker compose up -d --force-recreate spark-master spark-worker
+```
+
+## Run Spark ETL
+
+Recommended (uses env from `.env` and forwards runtime options):
+
+Windows:
+
+```bash
+py scripts/run_spark_job.py
+```
+
+Linux/macOS:
+
+```bash
+python3 scripts/run_spark_job.py
+```
+
+Direct run inside container (alternative):
+
+```bash
+docker compose exec -T spark-master /opt/spark/bin/spark-submit --master spark://spark-master:7077 /opt/spark/jobs/transform.py
+```
+
+## Service URLs
+
+| Service | URL |
+|---|---|
+| NiFi | http://localhost:8080 |
+| MinIO Console | http://localhost:9001 |
+| Spark Master UI | http://localhost:8081 |
+| Spark Driver UI | http://localhost:4040 |
+| Spark Worker UI | http://localhost:8082 |
+| FastAPI | http://localhost:8000 |
+| FastAPI Docs | http://localhost:8000/docs |
+| Metabase (profile: bi) | http://localhost:3000 |
 
 Notes:
-
-- NiFi flow state is persisted in the mounted `nifi/` folders.
-- Source CSV files should be placed in `/mnt/d/data/Nifi-input`.
-- If you edit the flow in NiFi UI, the config is kept in `nifi/conf/flow.xml.gz`.
+- `http://localhost:4040` is available only while a Spark job is running.
+- If 4040 is busy, Spark may switch to `4041`, `4042`, etc.
 
 ## Main Tables
 
@@ -47,89 +96,30 @@ dwh.fact_usage_daily
 dwh.usage_summary_daily
 ```
 
-## API
+## Re-Run And Recovery Commands
 
-### Public
-
-- `GET /health`
-- `GET /api/usage/daily`
-- `GET /api/analytics/metrics/usage-summary`
-- `GET /api/analytics/metrics/usage-trend`
-
-### Internal
-
-- `GET /internal/staging/flexi`
-- `GET /internal/staging/icc`
-
-## Data Usage
-
-- `dwh.fact_usage_daily`: detail / drill-down
-- `dwh.usage_summary_daily`: dashboard summary / trend
-
-## Performance
-
-For summary range queries, keep this index:
-
-```sql
-CREATE INDEX IF NOT EXISTS idx_usage_summary_usage_date_call_type
-ON dwh.usage_summary_daily (usage_date, call_type_code);
-```
-
-The API also uses a short TTL in-memory cache for hot dashboard requests.
-
-## Project Layout
-
-```text
-api/                 FastAPI app
-spark/jobs/          Spark ETL job
-scripts/             Spark helper script
-postgres/init/       PostgreSQL init SQL
-docker-compose.yml   Local stack
-```
-
-## Run
-
-Use a terminal with Docker/Docker Compose installed. The services themselves run inside containers.
-
-Start all services:
+Reset ingest manifest completely (full replay):
 
 ```bash
-docker compose up -d --build
+docker compose exec -T postgres psql -U postgres -d postgres -c "UPDATE public.ingest_manifest SET processed_flag=0, processed_time=NULL, batch_id=NULL, error_message=NULL WHERE job_name='transform_usage_daily';"
 ```
 
-Rebuild API only:
+
+Check manifest status:
 
 ```bash
-docker compose up -d --build api
+docker compose exec -T postgres psql -U postgres -d postgres -c "SELECT processed_flag, count(*) FROM public.ingest_manifest WHERE job_name='transform_usage_daily' GROUP BY processed_flag ORDER BY processed_flag;"
 ```
 
-Run the Spark job directly inside the Spark container:
+Check staging + DWH row counts:
 
 ```bash
-docker exec -it spark-master /opt/spark/bin/spark-submit --master spark://spark-master:7077 /opt/spark/jobs/transform.py
+docker compose exec -T postgres psql -U postgres -d postgres -c "SELECT count(*) AS stg_flexi FROM public.stg_frt_flexi_raw; SELECT count(*) AS stg_icc FROM public.stg_frt_in_icc_raw; SELECT count(*) AS fact_rows FROM dwh.fact_usage_daily; SELECT count(*) AS summary_rows FROM dwh.usage_summary_daily;"
 ```
 
-## URLs
-
-| Service | URL |
-|---|---|
-| NiFi | http://localhost:8080 |
-| MinIO Console | http://localhost:9001 |
-| Spark UI | http://localhost:8081 |
-| FastAPI | http://localhost:8000 |
-| FastAPI Docs | http://localhost:8000/docs |
-| Metabase | http://localhost:3000 |
-
-## Useful Commands
-
-Reset ingest flags:
-
-```bash
-docker compose exec -T postgres psql -U postgres -d postgres -c "UPDATE public.ingest_manifest SET processed_flag=0, processed_time=NULL WHERE job_name='transform_usage_daily';"
-```
-
-Truncate staging and analytical tables:
+Truncate staging and marts:
 
 ```bash
 docker compose exec -T postgres psql -U postgres -d postgres -c "TRUNCATE TABLE public.stg_frt_flexi_raw, public.stg_frt_in_icc_raw, dwh.fact_usage_daily, dwh.usage_summary_daily;"
 ```
+

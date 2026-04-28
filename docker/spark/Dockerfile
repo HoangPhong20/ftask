@@ -3,6 +3,8 @@ FROM ${SPARK_BASE_IMAGE}
 
 USER root
 
+ENV PATH="/opt/spark/bin:${PATH}"
+
 # Copy Spark jobs
 COPY spark/jobs /opt/spark/jobs
 
