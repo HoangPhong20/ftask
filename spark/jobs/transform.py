@@ -33,7 +33,8 @@ from spark.dwh import (  # noqa: E402
 from spark.pipeline import (  # noqa: E402
     build_empty_raw_df,
     claim_manifest_batch,
-    execute_jdbc_update,
+    escape_sql_literal,
+    execute_jdbc_updates_batch,
     has_any_row,
     iter_chunks,
     maybe_materialize,
@@ -79,25 +80,28 @@ def main() -> None:
         enable_salt_agg = env("ENABLE_SALT_AGG", "false").lower() == "true"
         salt_buckets = int(env("SALT_BUCKETS", "8"))
         call_type_broadcast_threshold = int(env("CALL_TYPE_BROADCAST_THRESHOLD", "2000"))
-        if enable_salt_agg:
-            logger.warning("ENABLE_SALT_AGG=true. Keep this ON only when key skew is significant (e.g. top key >30%%).")
-        batch_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
 
+        if enable_salt_agg:
+            logger.warning("ENABLE_SALT_AGG=true. Keep ON only when key skew is significant (top key >30%%).")
+
+        batch_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
         pg_url = with_postgres_jdbc_optimizations(env("PG_JDBC_URL", "jdbc:postgresql://postgres:5432/postgres"))
         jdbc_props = {
             "user": env("PG_USER", "postgres"),
             "password": env("PG_PASSWORD", "123456"),
             "driver": "org.postgresql.Driver",
         }
-
         profile_materialize = env("PIPELINE_PROFILE_MATERIALIZE", "false").lower() == "true"
         flexi_schema = get_flexi_schema()
         icc_schema = get_icc_schema()
 
+        # ── Step 1: Claim manifest batch ─────────────────────────────────────
         with stage_timer("manifest.claim"):
-            df_manifest = claim_manifest_batch(spark, pg_url, jdbc_props, manifest_job_name, batch_id, manifest_batch_size)
+            df_manifest = claim_manifest_batch(
+                spark, pg_url, jdbc_props, manifest_job_name, batch_id, manifest_batch_size
+            )
 
-        if df_manifest.rdd.isEmpty():
+        if df_manifest.limit(1).count() == 0:
             logger.info("No pending rows in ingest_manifest for job=%s. Nothing to process.", manifest_job_name)
             with stage_timer("spark_session.stop"):
                 spark.stop()
@@ -120,28 +124,53 @@ def main() -> None:
             else:
                 unknown_ids.append(row_id)
 
-        flexi_important_cols = ["charging_id", "record_sequence_number", "record_opening_time", "record_type", "duration", "served_msisdn", "ftp_filename"]
-        icc_important_cols = ["org_call_id", "call_reference", "call_sta_time", "call_type", "used_duration"]
+        flexi_important_cols = [
+            "charging_id", "record_sequence_number", "record_opening_time",
+            "record_type", "duration", "served_msisdn", "ftp_filename",
+        ]
+        icc_important_cols = [
+            "org_call_id", "call_reference", "call_sta_time", "call_type", "used_duration",
+        ]
 
         try:
-            df_flexi_raw = read_manifest_csv_with_schema(spark, flexi_paths, flexi_schema) if flexi_paths else build_empty_raw_df(spark, flexi_important_cols)
-            df_icc_raw = read_manifest_csv_with_schema(spark, icc_paths, icc_schema) if icc_paths else build_empty_raw_df(spark, icc_important_cols)
+            # ── Step 2: Read + normalize CSVs ─────────────────────────────────
+            df_flexi_raw = (
+                read_manifest_csv_with_schema(spark, flexi_paths, flexi_schema)
+                if flexi_paths else build_empty_raw_df(spark, flexi_important_cols)
+            )
+            df_icc_raw = (
+                read_manifest_csv_with_schema(spark, icc_paths, icc_schema)
+                if icc_paths else build_empty_raw_df(spark, icc_important_cols)
+            )
 
             df_flexi_raw = select_important_columns(df_flexi_raw, "flexi", flexi_important_cols)
             df_icc_raw = select_important_columns(df_icc_raw, "icc", icc_important_cols)
 
-            df_flexi = normalize_and_dedup(df_flexi_raw, "flexi", flexi_important_cols, ["charging_id", "record_sequence_number", "record_opening_time", "served_msisdn", "ftp_filename"], shuffle_partitions)
-            df_icc = normalize_and_dedup(df_icc_raw, "icc", icc_important_cols, ["org_call_id", "call_reference"], shuffle_partitions)
+            df_flexi = normalize_and_dedup(
+                df_flexi_raw, "flexi", flexi_important_cols,
+                ["charging_id", "record_sequence_number", "record_opening_time", "served_msisdn", "ftp_filename"],
+                shuffle_partitions,
+            )
+            df_icc = normalize_and_dedup(
+                df_icc_raw, "icc", icc_important_cols,
+                ["org_call_id", "call_reference"],
+                shuffle_partitions,
+            )
 
             df_flexi = maybe_materialize(df_flexi, "flexi", profile_materialize)
             df_icc = maybe_materialize(df_icc, "icc", profile_materialize)
 
             if not has_any_row(df_flexi, "flexi") and not has_any_row(df_icc, "icc"):
-                raise RuntimeError("No valid rows after CSV parsing/normalization for claimed manifest batch. Please verify CSV header/format and parsing rules.")
+                raise RuntimeError(
+                    "No valid rows after CSV parsing/normalization for claimed manifest batch. "
+                    "Please verify CSV header/format and parsing rules."
+                )
 
+            # ── Step 3: Write processed Parquet ───────────────────────────────
             write_parquet_optimized(df_flexi, f"{processed_base}/frt_flexi_raw/", minio_write_mode, processed_output_partitions)
             write_parquet_optimized(df_icc, f"{processed_base}/frt_in_icc_raw/", minio_write_mode, processed_output_partitions)
 
+            # ── Step 4: Build and write staging tables ────────────────────────
             df_flexi_pg = process_flexi(df_flexi)
             df_icc_pg = process_icc(df_icc)
             logger.info("ICC staging dtypes=%s", df_icc_pg.dtypes)
@@ -149,8 +178,16 @@ def main() -> None:
             write_staging_table(df_flexi_pg, "public.stg_frt_flexi_raw", pg_url, jdbc_props, stg_write_mode, jdbc_batch_size, jdbc_num_partitions)
             write_staging_table(df_icc_pg, "public.stg_frt_in_icc_raw", pg_url, jdbc_props, stg_write_mode, jdbc_batch_size, jdbc_num_partitions)
 
-            df_flexi_daily = build_flexi_daily(df_flexi_pg, enable_salt_agg, salt_buckets, parse_nullable_double).persist(StorageLevel.MEMORY_AND_DISK)
-            df_flexi_daily = maybe_materialize(df_flexi_daily, "flexi_daily", profile_materialize)
+            # ── Step 5: Build DWH dims + fact ─────────────────────────────────
+            # persist() once — feeds dim_date, dim_call_type, fact, summary.
+            # Do NOT maybe_materialize before persist: that triggers count()
+            # before persist is set up, forcing a full recompute.
+            df_flexi_daily = build_flexi_daily(
+                df_flexi_pg, enable_salt_agg, salt_buckets, parse_nullable_double
+            ).persist(StorageLevel.MEMORY_AND_DISK)
+
+            df_flexi_daily.count()  # force materialize into cache
+            logger.info("df_flexi_daily persisted to MEMORY_AND_DISK")
 
             df_dim_date_candidates = build_dim_date(df_flexi_daily)
             df_dim_date_existing = read_jdbc_table(spark, "dwh.dim_date", pg_url, jdbc_props).select("date_key")
@@ -170,20 +207,46 @@ def main() -> None:
 
             write_parquet_optimized(df_fact_usage_daily_curated, f"{curated_base}/fact_usage_daily/", minio_write_mode, curated_output_partitions)
             write_staging_table(
-                df_fact_usage_daily_curated.select("date_key", "call_type_key", "usage_date", col("call_type_code").alias("call_type"), "event_count", "total_used_duration"),
+                df_fact_usage_daily_curated.select(
+                    "date_key", "call_type_key", "usage_date",
+                    col("call_type_code").alias("call_type"),
+                    "event_count", "total_used_duration",
+                ),
                 "dwh.fact_usage_daily", pg_url, jdbc_props, dwh_write_mode, jdbc_batch_size, jdbc_num_partitions,
             )
 
+            # ── Step 6: Summary upsert ────────────────────────────────────────
+            # collect() on distinct usage_dates is safe: O(days_in_batch) ≤ 31 rows.
+            # All DELETEs run in a single JDBC connection via execute_jdbc_updates_batch.
             df_usage_summary_daily_curated = build_usage_summary_daily(df_fact_usage_daily_curated)
-            summary_usage_dates = [r["usage_date"] for r in df_usage_summary_daily_curated.select("usage_date").dropDuplicates(["usage_date"]).collect()]
-            for chunk in iter_chunks(summary_usage_dates, 500):
-                date_clause = ",".join(f"DATE '{d}'" for d in chunk)
-                execute_jdbc_update(spark, pg_url, jdbc_props, f"DELETE FROM dwh.usage_summary_daily WHERE usage_date IN ({date_clause})")
-            write_staging_table(df_usage_summary_daily_curated, "dwh.usage_summary_daily", pg_url, jdbc_props, "append", jdbc_batch_size, jdbc_num_partitions)
+
+            summary_usage_dates = [
+                r["usage_date"]
+                for r in df_usage_summary_daily_curated
+                .select("usage_date")
+                .dropDuplicates(["usage_date"])
+                .collect()
+            ]
+            delete_sqls = [
+                "DELETE FROM dwh.usage_summary_daily WHERE usage_date IN ({})".format(
+                    ",".join("DATE '{}'".format(d) for d in chunk)
+                )
+                for chunk in iter_chunks(summary_usage_dates, 500)
+            ]
+            if delete_sqls:
+                execute_jdbc_updates_batch(spark, pg_url, jdbc_props, delete_sqls)
+
+            write_staging_table(
+                df_usage_summary_daily_curated,
+                "dwh.usage_summary_daily", pg_url, jdbc_props, "append", jdbc_batch_size, jdbc_num_partitions,
+            )
 
             df_flexi_daily.unpersist()
+
+            # ── Step 7: Mark manifest success ─────────────────────────────────
             success_ids = [i for i in claimed_ids if i not in unknown_ids]
             update_manifest_status(spark, pg_url, jdbc_props, success_ids, batch_id=batch_id, status=1)
+
         except Exception as exc:
             failed_ids = [i for i in claimed_ids if i not in unknown_ids]
             update_manifest_status(spark, pg_url, jdbc_props, failed_ids, batch_id=batch_id, status=2, error_message=str(exc))

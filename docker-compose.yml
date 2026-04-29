@@ -1,4 +1,66 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Nifi Realtime Pipeline — docker-compose.yml
+#
+# Architecture:
+#   CSV → NiFi → MinIO → Spark ETL → PostgreSQL → FastAPI → Metabase
+#
+# Usage:
+#   docker compose up -d                        # core stack
+#   docker compose --profile bi up -d           # + Metabase
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Reusable YAML anchors ────────────────────────────────────────────────────────
+
+# Spark environment shared by both master and worker.
+# Changes here apply to both nodes automatically.
+x-spark-env: &spark-env
+  AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+  AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+  PYTHONPATH: /opt/project/spark
+  # S3A / MinIO
+  MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+  MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+  MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+  DATALAKE_BUCKET: ${DATALAKE_BUCKET}
+  # PostgreSQL JDBC
+  PG_JDBC_URL: ${PG_JDBC_URL}
+  PG_USER: ${PG_USER}
+  PG_PASSWORD: ${PG_PASSWORD}
+  # Spark tuning
+  SPARK_SHUFFLE_PARTITIONS: ${SPARK_SHUFFLE_PARTITIONS}
+  SPARK_DEFAULT_PARALLELISM: ${SPARK_DEFAULT_PARALLELISM}
+  SPARK_FILES_MAX_PARTITION_BYTES: ${SPARK_FILES_MAX_PARTITION_BYTES}
+  SPARK_FILES_OPEN_COST_BYTES: ${SPARK_FILES_OPEN_COST_BYTES}
+  SPARK_ADVISORY_PARTITION_SIZE_BYTES: ${SPARK_ADVISORY_PARTITION_SIZE_BYTES}
+  SPARK_AUTO_BROADCAST_JOIN_THRESHOLD: ${SPARK_AUTO_BROADCAST_JOIN_THRESHOLD}
+  SPARK_DRIVER_MAX_RESULT_SIZE: ${SPARK_DRIVER_MAX_RESULT_SIZE}
+  # Write behavior
+  MINIO_WRITE_MODE: ${MINIO_WRITE_MODE}
+  STG_WRITE_MODE: ${STG_WRITE_MODE}
+  DWH_DIM_WRITE_MODE: ${DWH_DIM_WRITE_MODE}
+  DWH_FACT_WRITE_MODE: ${DWH_FACT_WRITE_MODE}
+  # JDBC write
+  JDBC_BATCH_SIZE: ${JDBC_BATCH_SIZE}
+  JDBC_NUM_PARTITIONS: ${JDBC_NUM_PARTITIONS}
+  JDBC_WRITE_MAX_RETRIES: ${JDBC_WRITE_MAX_RETRIES:-3}
+  JDBC_WRITE_RETRY_SLEEP_SECONDS: ${JDBC_WRITE_RETRY_SLEEP_SECONDS:-5}
+  # Manifest / pipeline
+  INGEST_MANIFEST_JOB_NAME: ${INGEST_MANIFEST_JOB_NAME}
+  INGEST_MANIFEST_BATCH_SIZE: ${INGEST_MANIFEST_BATCH_SIZE}
+  CURATED_FACT_OUTPUT_PARTITIONS: ${CURATED_FACT_OUTPUT_PARTITIONS}
+  PROCESSED_OUTPUT_PARTITIONS: ${PROCESSED_OUTPUT_PARTITIONS}
+  ENABLE_SALT_AGG: ${ENABLE_SALT_AGG}
+  SALT_BUCKETS: ${SALT_BUCKETS}
+  CALL_TYPE_BROADCAST_THRESHOLD: ${CALL_TYPE_BROADCAST_THRESHOLD}
+
+# Spark volumes shared by master and worker.
+x-spark-volumes: &spark-volumes
+  - ./spark:/opt/project/spark   # live-reload in dev; shadowed by COPY in prod
+  - ./jars_spark:/opt/spark/jars-ext
+
 services:
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
   postgres:
     image: ${POSTGRES_IMAGE}
     container_name: nifi-postgres
@@ -17,68 +79,78 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./postgres/init:/docker-entrypoint-initdb.d
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 15
+      start_period: 10s
     networks:
       - data-platform
 
-  nifi:
-    image: ${NIFI_IMAGE}
-    container_name: nifi
-    restart: unless-stopped
-    environment:
-      NIFI_WEB_HTTP_PORT: 8080
-      NIFI_JVM_HEAP_INIT: 2g
-      NIFI_JVM_HEAP_MAX: 4g
-    ports:
-      - "8080:8080"
-    volumes:
-      - ./nifi/conf:/opt/nifi/nifi-current/conf
-      - ./nifi/flowfile:/opt/nifi/nifi-current/flowfile_repository
-      - ./nifi/database:/opt/nifi/nifi-current/database_repository
-      - ./nifi/state:/opt/nifi/nifi-current/state
-      - /mnt/d/data/Nifi-input:/data/input # Mount local directory for Nifi input data
-      - ./jars_spark:/opt/nifi/drivers:ro
-    networks:
-      - data-platform
+  # ── MinIO object storage ────────────────────────────────────────────────────
   minio:
     image: ${MINIO_IMAGE}
-    container_name: minio
+    container_name: nifi-minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Web console → http://localhost:9001
     volumes:
       - minio_data:/data
     networks:
       - data-platform
 
+  # ── MinIO bucket bootstrap (runs once then exits) ───────────────────────────
   minio-init:
     image: ${MINIO_MC_IMAGE}
-    container_name: minio-init
+    container_name: nifi-minio-init
+    restart: "no"
     depends_on:
       - minio
     entrypoint: >
       /bin/sh -c "
-      sleep 2;
-      until (mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD} && mc ready local); do sleep 2; done;
-      mc mb --ignore-existing local/${MINIO_BUCKET};
-      mc version enable local/${MINIO_BUCKET};
-      mc version info local/${MINIO_BUCKET};
-      mc anonymous set private local/${MINIO_BUCKET};
-      exit 0;
+        until mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD}; do
+          echo 'Waiting for MinIO to be reachable...';
+          sleep 2;
+        done;
+        mc mb --ignore-existing local/${MINIO_BUCKET};
+        mc version enable local/${MINIO_BUCKET};
+        mc anonymous set private local/${MINIO_BUCKET};
+        echo 'MinIO bucket ready.';
       "
     networks:
       - data-platform
 
+  # ── Apache NiFi ─────────────────────────────────────────────────────────────
+  nifi:
+    image: ${NIFI_IMAGE}
+    container_name: nifi
+    restart: unless-stopped
+    depends_on:
+      - minio
+    environment:
+      NIFI_WEB_HTTP_PORT: 8080
+      NIFI_JVM_HEAP_INIT: 2g
+      NIFI_JVM_HEAP_MAX: 4g
+    ports:
+      - "8080:8080"   # NiFi UI → http://localhost:8080
+    volumes:
+      - ./nifi/conf:/opt/nifi/nifi-current/conf
+      - ./nifi/flowfile:/opt/nifi/nifi-current/flowfile_repository
+      - ./nifi/database:/opt/nifi/nifi-current/database_repository
+      - ./nifi/state:/opt/nifi/nifi-current/state
+      - /mnt/d/data/Nifi-input:/data/input   # host CSV drop folder
+      - ./jars_spark:/opt/nifi/drivers:ro
+    networks:
+      - data-platform
+
+  # ── Spark master ────────────────────────────────────────────────────────────
   spark-master:
     build:
       context: .
@@ -86,62 +158,48 @@ services:
       args:
         SPARK_BASE_IMAGE: ${SPARK_BASE_IMAGE}
     image: ${SPARK_IMAGE}
-    container_name: spark-master
+    container_name: nifi-spark-master
     restart: unless-stopped
-    env_file:
-      - .env
+    depends_on:
+      minio:
+        condition: service_started
+      postgres:
+        condition: service_healthy
     command:
       - /opt/spark/bin/spark-class
       - org.apache.spark.deploy.master.Master
       - --host
-      - 0.0.0.0
+      - spark-master      # use service name so workers can resolve it
       - --port
       - "7077"
       - --webui-port
       - "8080"
     ports:
-      - "7077:7077"
-      - "8090:8080"
-      - "4040:4040"
+      - "7077:7077"       # Spark cluster port
+      - "8081:8080"       # Spark Master UI  → http://localhost:8081
+      - "4040:4040"       # Spark Driver UI  → http://localhost:4040 (job only)
     environment:
-      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
-      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
-      SPARK_SHUFFLE_PARTITIONS: ${SPARK_SHUFFLE_PARTITIONS}
-      CALL_TYPE_BROADCAST_THRESHOLD: ${CALL_TYPE_BROADCAST_THRESHOLD}
-      MINIO_WRITE_MODE: ${MINIO_WRITE_MODE}
-      DWH_DIM_WRITE_MODE: ${DWH_DIM_WRITE_MODE}
-      DWH_FACT_WRITE_MODE: ${DWH_FACT_WRITE_MODE}
-      JDBC_BATCH_SIZE: ${JDBC_BATCH_SIZE}
-      JDBC_NUM_PARTITIONS: ${JDBC_NUM_PARTITIONS}
-      DIM_EMP_LOWER_BOUND: ${DIM_EMP_LOWER_BOUND}
-      DIM_EMP_UPPER_BOUND: ${DIM_EMP_UPPER_BOUND}
-      DIM_TIME_LOWER_BOUND: ${DIM_TIME_LOWER_BOUND}
-      DIM_TIME_UPPER_BOUND: ${DIM_TIME_UPPER_BOUND}
-      PG_JDBC_URL: ${PG_JDBC_URL}
-      PG_USER: ${PG_USER}
-      PG_PASSWORD: ${PG_PASSWORD}
-      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
-      DATALAKE_BUCKET: ${DATALAKE_BUCKET}
-      SPARK_HADOOP_AWS_JAR: ${SPARK_HADOOP_AWS_JAR}
-      SPARK_AWS_SDK_BUNDLE_JAR: ${SPARK_AWS_SDK_BUNDLE_JAR}
-      SPARK_POSTGRES_JDBC_JAR: ${SPARK_POSTGRES_JDBC_JAR}
-      PYTHONPATH: /opt/project
-    volumes:
-      - ./spark:/opt/project/spark
-      - ./jars_spark:/opt/spark/jars-ext
+      <<: *spark-env
+    volumes: *spark-volumes
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     networks:
       - data-platform
+
+  # ── Spark worker ────────────────────────────────────────────────────────────
   spark-worker:
     image: ${SPARK_IMAGE}
+    container_name: nifi-spark-worker
     restart: unless-stopped
+    depends_on:
+      spark-master:
+        condition: service_healthy
     cpus: ${SPARK_WORKER_CORES}
     mem_limit: ${SPARK_WORKER_MEMORY}
-    depends_on:
-      - spark-master
-    env_file:
-      - .env
     command:
       - /opt/spark/bin/spark-class
       - org.apache.spark.deploy.worker.Worker
@@ -153,22 +211,19 @@ services:
       - "8081"
       - spark://spark-master:7077
     ports:
-      - "8082:8081"
+      - "8082:8081"       # Spark Worker UI → http://localhost:8082
     environment:
-      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
-      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
-      SPARK_SHUFFLE_PARTITIONS: ${SPARK_SHUFFLE_PARTITIONS}
-      PYTHONPATH: /opt/project
-    volumes:
-      - ./spark:/opt/project/spark
-      - ./jars_spark:/opt/spark/jars-ext
+      <<: *spark-env
+    volumes: *spark-volumes
     networks:
       - data-platform
 
+  # ── FastAPI ─────────────────────────────────────────────────────────────────
   api:
     build:
       context: .
       dockerfile: docker/api/Dockerfile
+    image: nifi-api:local
     container_name: nifi-api
     restart: unless-stopped
     depends_on:
@@ -181,13 +236,20 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     ports:
-      - "8000:8000"
+      - "8000:8000"       # FastAPI → http://localhost:8000/docs
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     networks:
       - data-platform
 
+  # ── Metabase (profile: bi) ───────────────────────────────────────────────────
   metabase:
     image: ${METABASE_IMAGE}
-    container_name: metabase
+    container_name: nifi-metabase
     restart: unless-stopped
     depends_on:
       postgres:
@@ -200,7 +262,7 @@ services:
       MB_DB_PASS: ${POSTGRES_PASSWORD}
       MB_DB_HOST: postgres
     ports:
-      - "3000:3000"
+      - "3000:3000"       # Metabase → http://localhost:3000
     profiles:
       - bi
     networks:
@@ -212,3 +274,4 @@ volumes:
 
 networks:
   data-platform:
+    driver: bridge
