@@ -97,6 +97,7 @@ def build_spark_submit_command() -> List[str]:
 
     # Forward selected .env keys into the spark-master exec process.
     for key in [
+        "SPARK_MASTER_URL",
         "PG_JDBC_URL",
         "PG_USER",
         "PG_PASSWORD",

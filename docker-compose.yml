@@ -154,7 +154,7 @@ services:
   spark-master:
     build:
       context: .
-      dockerfile: docker/spark/Dockerfile
+      dockerfile: spark/Dockerfile
       args:
         SPARK_BASE_IMAGE: ${SPARK_BASE_IMAGE}
     image: ${SPARK_IMAGE}
@@ -192,6 +192,9 @@ services:
 
   # ── Spark worker ────────────────────────────────────────────────────────────
   spark-worker:
+    build:
+      context: .
+      dockerfile: spark/Dockerfile
     image: ${SPARK_IMAGE}
     container_name: nifi-spark-worker
     restart: unless-stopped
@@ -221,8 +224,8 @@ services:
   # ── FastAPI ─────────────────────────────────────────────────────────────────
   api:
     build:
-      context: .
-      dockerfile: docker/api/Dockerfile
+      context: ./api
+      dockerfile: Dockerfile
     image: nifi-api:local
     container_name: nifi-api
     restart: unless-stopped

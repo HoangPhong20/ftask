@@ -109,9 +109,8 @@ def build_spark() -> SparkSession:
 def with_target_partitions(df: DataFrame, target_partitions: int) -> DataFrame:
     """Always repartition to target — never coalesce.
 
-    coalesce(N) is a no-op when the current partition count < N, so a DataFrame
-    with 4 partitions after coalesce(50) still has 4 partitions going into the
-    JDBC write, creating a bottleneck.  repartition always produces exactly N.
+    JDBC write parallelism comes from DataFrame partitions. Repartition here
+    at the write boundary so earlier transforms do not add extra shuffles.
     """
     return df.repartition(max(target_partitions, 1))
 
@@ -169,12 +168,24 @@ def write_staging_table(
 def write_parquet_optimized(df: DataFrame, path: str, mode: str, num_partitions: int) -> None:
     """Write Parquet to S3A/MinIO.
 
-    Always repartition (not coalesce) so every executor gets work.
+    Coalesce when reducing file count; repartition only when increasing partitions.
     snappy is the best balance of speed vs size for intermediate/processed data.
     """
     target_partitions = max(num_partitions, 1)
-    logger.info("Writing parquet path=%s mode=%s partitions=%s", path, mode, target_partitions)
-    df.repartition(target_partitions).write.mode(mode).option("compression", "snappy").parquet(path)
+    current_partitions = df.rdd.getNumPartitions()
+    logger.info(
+        "Writing parquet path=%s mode=%s current_partitions=%s target_partitions=%s",
+        path, mode, current_partitions, target_partitions,
+    )
+
+    if current_partitions > target_partitions:
+        output_df = df.coalesce(target_partitions)
+    elif current_partitions < target_partitions:
+        output_df = df.repartition(target_partitions)
+    else:
+        output_df = df
+
+    output_df.write.mode(mode).option("compression", "snappy").parquet(path)
 
 
 def read_jdbc_table(spark: SparkSession, table_name: str, pg_url: str, jdbc_props: dict) -> DataFrame:

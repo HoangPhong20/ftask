@@ -1,7 +1,7 @@
 ARG SPARK_BASE_IMAGE=apache/spark:3.5.8-scala2.12-java11-python3-r-ubuntu
 FROM ${SPARK_BASE_IMAGE}
 
-# ── Root: install deps and copy artifacts ────────────────────────────────────
+# â”€â”€ Root: install deps and copy artifacts â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 USER root
 
 ENV PATH="/opt/spark/bin:${PATH}"
@@ -23,5 +23,5 @@ COPY jars_spark/*.jar /opt/spark/jars/
 # Fix permissions for the spark user (UID 185 in the base image)
 RUN chmod -R 755 /opt/project/spark /opt/spark/jars
 
-# ── Drop back to unprivileged spark user ─────────────────────────────────────
+# â”€â”€ Drop back to unprivileged spark user â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 USER spark

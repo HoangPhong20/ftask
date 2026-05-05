@@ -71,7 +71,6 @@ def normalize_and_dedup(
     label: str,
     important_cols: list[str],
     key_candidates: list[str],
-    num_partitions: int,
 ) -> DataFrame:
     normalized_cols = [c for c in important_cols if c in df.columns]
     logger.info("[%s] normalize target columns=%s", label, normalized_cols)
@@ -86,7 +85,7 @@ def normalize_and_dedup(
     if keys:
         out = out.dropDuplicates(keys)
     logger.info("[%s] normalize+dedup keys=%s", label, keys)
-    return out.repartition(max(num_partitions, 1))
+    return out
 
 
 def select_important_columns(df: DataFrame, label: str, important_cols: list[str]) -> DataFrame:
@@ -106,9 +105,10 @@ def maybe_materialize(df: DataFrame, label: str, enabled: bool) -> DataFrame:
     if not enabled:
         logger.info("[%s] skip materialize (set PIPELINE_PROFILE_MATERIALIZE=true to enable)", label)
         return df
-    with stage_timer(f"{label}.materialize_count"):
-        count = df.count()
-        logger.info("[%s] row_count=%s", label, count)
+    # Trigger one action to profile lineage execution without doing a full count aggregation.
+    with stage_timer(f"{label}.materialize_probe"):
+        has_row = len(df.take(1)) > 0
+        logger.info("[%s] materialize_probe_has_row=%s", label, has_row)
     return df
 
 
@@ -116,9 +116,9 @@ def has_any_row(df: DataFrame, label: str) -> bool:
     """Check if a DataFrame has at least one row without triggering a full scan.
 
     rdd.isEmpty() scans the entire dataset (equivalent to count() == 0).
-    limit(1).count() stops as soon as it finds one row — O(1) happy path.
+    take(1) stops as soon as it finds one row — O(1) happy path.
     """
-    has_row = df.limit(1).count() > 0
+    has_row = len(df.take(1)) > 0
     logger.info("[%s] has_any_row=%s", label, has_row)
     return has_row
 

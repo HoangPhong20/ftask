@@ -17,6 +17,7 @@ from spark.core import (  # noqa: E402
     env,
     get_flexi_schema,
     get_icc_schema,
+    read_parquet,
     read_jdbc_table,
     with_postgres_jdbc_optimizations,
     write_parquet_optimized,
@@ -101,7 +102,7 @@ def main() -> None:
                 spark, pg_url, jdbc_props, manifest_job_name, batch_id, manifest_batch_size
             )
 
-        if df_manifest.limit(1).count() == 0:
+        if not has_any_row(df_manifest, "manifest_batch"):
             logger.info("No pending rows in ingest_manifest for job=%s. Nothing to process.", manifest_job_name)
             with stage_timer("spark_session.stop"):
                 spark.stop()
@@ -148,13 +149,11 @@ def main() -> None:
 
             df_flexi = normalize_and_dedup(
                 df_flexi_raw, "flexi", flexi_important_cols,
-                ["charging_id", "record_sequence_number", "record_opening_time", "served_msisdn", "ftp_filename"],
-                shuffle_partitions,
+                ["charging_id", "record_sequence_number", "record_opening_time"],
             )
             df_icc = normalize_and_dedup(
                 df_icc_raw, "icc", icc_important_cols,
                 ["org_call_id", "call_reference"],
-                shuffle_partitions,
             )
 
             df_flexi = maybe_materialize(df_flexi, "flexi", profile_materialize)
@@ -167,16 +166,25 @@ def main() -> None:
                 )
 
             # ── Step 3: Write processed Parquet ───────────────────────────────
-            write_parquet_optimized(df_flexi, f"{processed_base}/frt_flexi_raw/", minio_write_mode, processed_output_partitions)
-            write_parquet_optimized(df_icc, f"{processed_base}/frt_in_icc_raw/", minio_write_mode, processed_output_partitions)
+            flexi_processed_path = f"{processed_base}/frt_flexi_raw/batch_id={batch_id}/"
+            icc_processed_path = f"{processed_base}/frt_in_icc_raw/batch_id={batch_id}/"
+            write_parquet_optimized(df_flexi, flexi_processed_path, "overwrite", processed_output_partitions)
+            write_parquet_optimized(df_icc, icc_processed_path, "overwrite", processed_output_partitions)
+
+            # Read the silver boundary back to cut the raw CSV lineage before downstream actions.
+            df_flexi = read_parquet(spark, flexi_processed_path)
+            df_icc = read_parquet(spark, icc_processed_path)
 
             # ── Step 4: Build and write staging tables ────────────────────────
-            df_flexi_pg = process_flexi(df_flexi)
-            df_icc_pg = process_icc(df_icc)
+            # Persist staging dataframes to avoid re-computation and reduce shuffle/OOM risk
+            df_flexi_pg = process_flexi(df_flexi).persist(StorageLevel.MEMORY_AND_DISK)
+            df_icc_pg = process_icc(df_icc).persist(StorageLevel.MEMORY_AND_DISK)
             logger.info("ICC staging dtypes=%s", df_icc_pg.dtypes)
 
             write_staging_table(df_flexi_pg, "public.stg_frt_flexi_raw", pg_url, jdbc_props, stg_write_mode, jdbc_batch_size, jdbc_num_partitions)
             write_staging_table(df_icc_pg, "public.stg_frt_in_icc_raw", pg_url, jdbc_props, stg_write_mode, jdbc_batch_size, jdbc_num_partitions)
+            # df_icc_pg is not used later; free its storage
+            df_icc_pg.unpersist()
 
             # ── Step 5: Build DWH dims + fact ─────────────────────────────────
             # persist() once — feeds dim_date, dim_call_type, fact, summary.
@@ -186,8 +194,9 @@ def main() -> None:
                 df_flexi_pg, enable_salt_agg, salt_buckets, parse_nullable_double
             ).persist(StorageLevel.MEMORY_AND_DISK)
 
-            df_flexi_daily.count()  # force materialize into cache
-            logger.info("df_flexi_daily persisted to MEMORY_AND_DISK")
+            logger.info("df_flexi_daily persisted to MEMORY_AND_DISK (lazy materialization)")
+            # df_flexi_pg is no longer needed once df_flexi_daily is persisted
+            df_flexi_pg.unpersist()
 
             df_dim_date_candidates = build_dim_date(df_flexi_daily)
             df_dim_date_existing = read_jdbc_table(spark, "dwh.dim_date", pg_url, jdbc_props).select("date_key")
@@ -197,11 +206,15 @@ def main() -> None:
             df_dim_call_type_candidates = build_dim_call_type(df_flexi_daily)
             df_call_type_codes = df_dim_call_type_candidates.select("call_type_code").dropDuplicates(["call_type_code"])
             call_type_codes = [r["call_type_code"] for r in df_call_type_codes.collect() if r["call_type_code"] is not None]
-            df_dim_call_type_existing = read_dim_call_type_subset(spark, pg_url, jdbc_props, call_type_codes).select("call_type_code")
-            df_dim_call_type_new = df_dim_call_type_candidates.join(df_dim_call_type_existing, "call_type_code", "left_anti")
+            df_dim_call_type_existing = read_dim_call_type_subset(
+                spark, pg_url, jdbc_props, call_type_codes
+            ).persist(StorageLevel.MEMORY_AND_DISK)
+            df_dim_call_type_new = df_dim_call_type_candidates.join(
+                df_dim_call_type_existing.select("call_type_code"), "call_type_code", "left_anti"
+            )
             write_staging_table(df_dim_call_type_new, "dwh.dim_call_type", pg_url, jdbc_props, "append", jdbc_batch_size, jdbc_num_partitions)
 
-            df_dim_call_type_all = read_dim_call_type_subset(spark, pg_url, jdbc_props, call_type_codes).select("call_type_key", "call_type_code")
+            df_dim_call_type_all = df_dim_call_type_existing.select("call_type_key", "call_type_code")
             df_fact_usage_daily = build_fact_usage_daily(df_flexi_daily, df_dim_call_type_all, call_type_broadcast_threshold)
             df_fact_usage_daily_curated = to_curated_fact(df_fact_usage_daily)
 
@@ -242,6 +255,7 @@ def main() -> None:
             )
 
             df_flexi_daily.unpersist()
+            df_dim_call_type_existing.unpersist()
 
             # ── Step 7: Mark manifest success ─────────────────────────────────
             success_ids = [i for i in claimed_ids if i not in unknown_ids]
