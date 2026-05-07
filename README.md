@@ -239,6 +239,12 @@ On Windows with Python launcher:
 py scripts/run_spark_job.py
 ```
 
+On Ubuntu / WSL:
+
+```bash
+python3 scripts/run_spark_job.py
+```
+
 Direct Spark submit:
 
 ```bash
@@ -310,14 +316,6 @@ Usage trend:
 curl "http://localhost:8000/api/analytics/metrics/usage-trend?from=2026-01-01&to=2026-01-31&grain=day"
 ```
 
-### 5. View Dashboard
-
-Open Metabase at:
-
-```text
-http://localhost:3000
-```
-
 Connect Metabase to PostgreSQL and build charts from `dwh.usage_summary_daily` or `dwh.fact_usage_daily`.
 
 ## Manifest Status
@@ -340,47 +338,6 @@ s3a://datalake/processed/frt_flexi_raw/batch_id=<batch_id>/
 s3a://datalake/processed/frt_in_icc_raw/batch_id=<batch_id>/
 ```
 
-## Rebuild Spark Services
-
-```bash
-docker compose build spark-master spark-worker
-docker compose up -d --force-recreate spark-master spark-worker
-```
-
-Clean rebuild:
-
-```bash
-docker compose build --no-cache spark-master spark-worker
-docker compose up -d --force-recreate spark-master spark-worker
-```
-
-## Reset and Rerun
-
-Replay all manifest files:
-
-```bash
-docker compose exec -T postgres psql -U postgres -d postgres -c "
-UPDATE public.ingest_manifest
-SET processed_flag=0,
-    processed_time=NULL,
-    batch_id=NULL,
-    error_message=NULL
-WHERE job_name='transform_usage_daily';
-"
-```
-
-Clean staging and warehouse tables before a full replay:
-
-```bash
-docker compose exec -T postgres psql -U postgres -d postgres -c "
-TRUNCATE TABLE
-  public.stg_frt_flexi_raw,
-  public.stg_frt_in_icc_raw,
-  dwh.fact_usage_daily,
-  dwh.usage_summary_daily;
-"
-```
-
 ## Configuration Notes
 
 | Variable | Purpose |
@@ -394,40 +351,6 @@ TRUNCATE TABLE
 | `JDBC_BATCH_SIZE` | PostgreSQL insert batch size |
 | `ENABLE_SALT_AGG` | Enables salted aggregation when aggregation keys are heavily skewed |
 
-## Troubleshooting
-
-### Spark Processes No Files
-
-Check whether `public.ingest_manifest` has pending rows:
-
-```bash
-docker compose exec -T postgres psql -U postgres -d postgres -c "
-SELECT *
-FROM public.ingest_manifest
-WHERE processed_flag=0
-ORDER BY ingest_time
-LIMIT 20;
-"
-```
-
-### API Cannot Reach Database
-
-Check API health:
-
-```bash
-curl "http://localhost:8000/health"
-```
-
-Check containers:
-
-```bash
-docker compose ps
-```
-
-### Duplicate Data After Replay
-
-If running the pipeline in append mode, truncate target tables before replaying manifest files.
-
 ## Why This Project Matters
 
 This project demonstrates a practical data engineering workflow:
@@ -439,4 +362,3 @@ This project demonstrates a practical data engineering workflow:
 - exposing data through APIs and BI tools
 - packaging the system with Docker Compose
 
-It is intended to be understandable, runnable locally, and useful as a portfolio project for Data Engineer, Backend Engineer, or ETL Engineer roles.
