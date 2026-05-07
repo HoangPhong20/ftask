@@ -3,4 +3,7 @@ jars_spark/
 *.log
 spark/jars/*.jar
 nifi/drivers/*.jar
-data/
+nifi/conf/archive/
+nifi/database/
+nifi/state/
+nifi/flowfile/
