@@ -172,10 +172,10 @@ Review `.env` before starting the stack. Important settings include:
 ```text
 SPARK_SHUFFLE_PARTITIONS=16
 SPARK_DEFAULT_PARALLELISM=16
-PROCESSED_OUTPUT_PARTITIONS=8
-CURATED_FACT_OUTPUT_PARTITIONS=8
+PROCESSED_OUTPUT_PARTITIONS=4
+CURATED_FACT_OUTPUT_PARTITIONS=4
 JDBC_NUM_PARTITIONS=4
-JDBC_BATCH_SIZE=5000
+JDBC_BATCH_SIZE=10000
 ENABLE_SALT_AGG=false
 ```
 
@@ -341,7 +341,6 @@ s3a://datalake/processed/frt_in_icc_raw/batch_id=<batch_id>/
 
 | Variable | Purpose |
 |---|---|
-| `INGEST_MANIFEST_BATCH_SIZE` | Maximum number of files Spark claims per run |
 | `SPARK_SHUFFLE_PARTITIONS` | Number of Spark shuffle partitions |
 | `SPARK_DEFAULT_PARALLELISM` | Default Spark task parallelism |
 | `PROCESSED_OUTPUT_PARTITIONS` | Number of partitions for processed Parquet output |
