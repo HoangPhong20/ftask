@@ -170,7 +170,6 @@ cd Nifi
 Review `.env` before starting the stack. Important settings include:
 
 ```text
-INGEST_MANIFEST_BATCH_SIZE=5
 SPARK_SHUFFLE_PARTITIONS=16
 SPARK_DEFAULT_PARALLELISM=16
 PROCESSED_OUTPUT_PARTITIONS=8
