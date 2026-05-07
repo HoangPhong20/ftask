@@ -145,7 +145,7 @@ def write_staging_table(
                 with_target_partitions(df, target_partitions)
                 .write.mode(mode)
                 .option("batchsize", batch_size)
-                .option("numPartitions", str(target_partitions))
+                .option("rewriteBatchedInserts", "true")
                 .option("isolationLevel", "NONE")
                 .option("truncate", "false")
                 .jdbc(pg_url, table_name, properties=jdbc_props)
