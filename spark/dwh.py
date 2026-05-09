@@ -83,21 +83,14 @@ def build_dim_call_type(df_flexi_daily: DataFrame) -> DataFrame:
     )
 
 
-def build_fact_usage_daily(df_flexi_daily: DataFrame, df_dim_call_type: DataFrame, call_type_broadcast_threshold: int) -> DataFrame:
-    df_fact_call_type_codes = df_flexi_daily.select("call_type_code").dropDuplicates(["call_type_code"])
-    sampled_codes = df_fact_call_type_codes.limit(call_type_broadcast_threshold + 1).count()
-    should_broadcast_call_type = sampled_codes <= call_type_broadcast_threshold
-
-    df_dim_call_type_filtered = df_dim_call_type.join(df_fact_call_type_codes, "call_type_code", "inner").dropDuplicates(["call_type_code"])
-    if should_broadcast_call_type:
-        logger.info("Broadcast dim_call_type enabled: unique_call_types=%s threshold=%s", sampled_codes, call_type_broadcast_threshold)
-        df_dim_call_type_filtered = broadcast(df_dim_call_type_filtered)
-    else:
-        logger.info("Broadcast dim_call_type disabled: unique_call_types>%s", call_type_broadcast_threshold)
+def build_fact_usage_daily(df_flexi_daily: DataFrame, df_dim_call_type: DataFrame, _call_type_broadcast_threshold: int) -> DataFrame:
+    df_dim_call_type_prepared = df_dim_call_type.select("call_type_key", "call_type_code").dropDuplicates(["call_type_code"])
+    logger.info("Broadcast dim_call_type enabled")
+    df_dim_call_type_prepared = broadcast(df_dim_call_type_prepared)
 
     return (
         df_flexi_daily.withColumn("date_key", date_format(col("usage_date"), "yyyyMMdd").cast("int"))
-        .join(df_dim_call_type_filtered.select("call_type_key", "call_type_code"), "call_type_code", "left")
+        .join(df_dim_call_type_prepared, "call_type_code", "left")
         .withColumn("call_type_key", col("call_type_key").cast("long"))
         .withColumn("total_used_duration", spark_coalesce(col("total_used_duration"), lit(0.0)))
         .select("date_key", "call_type_key", "call_type_code", "event_count", "total_used_duration")
@@ -107,9 +100,13 @@ def build_fact_usage_daily(df_flexi_daily: DataFrame, df_dim_call_type: DataFram
 
 def build_usage_summary_daily(df_fact_usage_daily_curated: DataFrame) -> DataFrame:
     return (
-        df_fact_usage_daily_curated.groupBy("usage_date", "call_type_key", "call_type_code")
-        .agg(spark_sum("event_count").alias("event_count"), spark_sum("total_used_duration").alias("total_used_duration"))
-        .select("usage_date", "call_type_key", "call_type_code", "event_count", "total_used_duration")
+        df_fact_usage_daily_curated.select(
+            "usage_date",
+            "call_type_key",
+            "call_type_code",
+            "event_count",
+            "total_used_duration",
+        )
     )
 
 

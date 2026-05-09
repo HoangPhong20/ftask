@@ -13,7 +13,7 @@ STAGE_CALL_COUNT = defaultdict(int)
 
 @contextmanager
 def stage_timer(stage: str):
-    start_ts = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    start_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
     start = time.perf_counter()
     logger.info("[START] stage=%s ts=%s", stage, start_ts)
     try:
@@ -22,7 +22,7 @@ def stage_timer(stage: str):
         elapsed = time.perf_counter() - start
         STAGE_TOTAL_SECONDS[stage] += elapsed
         STAGE_CALL_COUNT[stage] += 1
-        end_ts = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+        end_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
         logger.info("[END] stage=%s ts=%s elapsed_seconds=%.3f", stage, end_ts, elapsed)
 
 

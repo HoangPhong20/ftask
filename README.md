@@ -88,7 +88,6 @@ The final output is a daily usage analytics model that can be queried directly f
 | API | FastAPI, Python |
 | BI | Metabase |
 | Runtime | Docker, Docker Compose |
-| Storage formats | CSV, Parquet |
 
 ## Project Structure
 
@@ -138,13 +137,21 @@ The warehouse uses a small star schema for daily telecom usage analytics.
 
 ### Fact Grain
 
-`dwh.fact_usage_daily` is aggregated by:
+`dwh.fact_usage_daily` and `dwh.usage_summary_daily` are aggregated by:
 
 - `usage_date`
-- `call_type`
+- `call_type_code`
 
 Main metrics:
 
+- `event_count`
+- `total_used_duration`
+
+`dwh.usage_summary_daily` is the dashboard-facing table. It contains:
+
+- `usage_date`
+- `call_type_key`
+- `call_type_code`
 - `event_count`
 - `total_used_duration`
 
@@ -155,6 +162,19 @@ Current note: the curated daily fact and summary are built from Flexi records. I
 - Docker
 - Docker Compose
 - Python 3.10+ if running helper scripts from the host machine
+
+## Run Order
+
+For a fresh local run, follow this sequence:
+
+1. Configure `.env`.
+2. Start the Docker Compose services.
+3. Ingest source CSV files through NiFi.
+4. Run the Spark ETL job.
+5. Check PostgreSQL warehouse tables.
+6. Use FastAPI or Metabase to query the curated data.
+
+The exact commands are listed once in the setup and usage sections below.
 
 ## Setup
 
@@ -175,7 +195,7 @@ SPARK_DEFAULT_PARALLELISM=16
 PROCESSED_OUTPUT_PARTITIONS=4
 CURATED_FACT_OUTPUT_PARTITIONS=4
 JDBC_NUM_PARTITIONS=4
-JDBC_BATCH_SIZE=10000
+JDBC_BATCH_SIZE=20000
 ENABLE_SALT_AGG=false
 ```
 
@@ -217,6 +237,12 @@ docker compose ps
 | Metabase | http://localhost:3000 |
 
 `http://localhost:4040` is available only while a Spark job is running.
+
+## Dashboard Preview
+
+Example Metabase dashboard built from `dwh.usage_summary_daily`:
+
+![Metabase telecom dashboard](docs/images/metabase-dashboard.png)
 
 ## Usage
 

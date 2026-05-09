@@ -240,6 +240,7 @@ def claim_manifest_batch(
           AND  processed_flag = 0
         ORDER BY ingest_time ASC, id ASC
         LIMIT {batch_size}
+        FOR UPDATE SKIP LOCKED
     )
     """
     execute_jdbc_update(spark, pg_url, jdbc_props, claim_sql)

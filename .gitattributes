@@ -1,0 +1,2 @@
+nifi/conf/*.conf text eol=lf
+nifi/conf/*.properties text eol=lf

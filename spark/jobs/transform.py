@@ -36,14 +36,12 @@ from spark.pipeline import (  # noqa: E402
     claim_manifest_batch,
     escape_sql_literal,
     execute_jdbc_updates_batch,
-    has_any_row,
     iter_chunks,
     maybe_materialize,
     normalize_and_dedup,
     parse_nullable_double,
     process_flexi,
     process_icc,
-    read_dim_call_type_subset,
     read_manifest_csv_with_schema,
     select_important_columns,
     to_s3a_path,
@@ -72,15 +70,16 @@ def main() -> None:
         stg_write_mode = env("STG_WRITE_MODE", "append")
         dwh_write_mode = env("DWH_FACT_WRITE_MODE", "append")
         shuffle_partitions = int(env("SPARK_SHUFFLE_PARTITIONS", "16"))
-        jdbc_batch_size = env("JDBC_BATCH_SIZE", "10000")
-        jdbc_num_partitions = int(env("JDBC_NUM_PARTITIONS", "12"))
+        jdbc_batch_size = env("JDBC_BATCH_SIZE", "20000")
+        jdbc_num_partitions = int(env("JDBC_NUM_PARTITIONS", "4"))
         manifest_job_name = env("INGEST_MANIFEST_JOB_NAME", "transform_usage_daily")
-        manifest_batch_size = int(env("INGEST_MANIFEST_BATCH_SIZE", "100"))
-        curated_output_partitions = int(env("CURATED_FACT_OUTPUT_PARTITIONS", "32"))
-        processed_output_partitions = int(env("PROCESSED_OUTPUT_PARTITIONS", "50"))
+        manifest_batch_size = int(env("INGEST_MANIFEST_BATCH_SIZE", "40"))
+        curated_output_partitions = int(env("CURATED_FACT_OUTPUT_PARTITIONS", "4"))
+        processed_output_partitions = int(env("PROCESSED_OUTPUT_PARTITIONS", "4"))
         enable_salt_agg = env("ENABLE_SALT_AGG", "false").lower() == "true"
         salt_buckets = int(env("SALT_BUCKETS", "8"))
         call_type_broadcast_threshold = int(env("CALL_TYPE_BROADCAST_THRESHOLD", "2000"))
+        cut_lineage_with_parquet = env("CUT_LINEAGE_WITH_PARQUET", "false").lower() == "true"
 
         if enable_salt_agg:
             logger.warning("ENABLE_SALT_AGG=true. Keep ON only when key skew is significant (top key >30%%).")
@@ -102,7 +101,8 @@ def main() -> None:
                 spark, pg_url, jdbc_props, manifest_job_name, batch_id, manifest_batch_size
             )
 
-        if not has_any_row(df_manifest, "manifest_batch"):
+        manifest_rows = df_manifest.collect()
+        if not manifest_rows:
             logger.info("No pending rows in ingest_manifest for job=%s. Nothing to process.", manifest_job_name)
             with stage_timer("spark_session.stop"):
                 spark.stop()
@@ -113,7 +113,7 @@ def main() -> None:
         icc_paths: list[str] = []
         unknown_ids: list[int] = []
 
-        for row in df_manifest.collect():
+        for row in manifest_rows:
             row_id = int(row["id"])
             s3_path = str(row["s3_path"])
             claimed_ids.append(row_id)
@@ -159,32 +159,35 @@ def main() -> None:
             df_flexi = maybe_materialize(df_flexi, "flexi", profile_materialize)
             df_icc = maybe_materialize(df_icc, "icc", profile_materialize)
 
-            if not has_any_row(df_flexi, "flexi") and not has_any_row(df_icc, "icc"):
+            if not flexi_paths and not icc_paths:
                 raise RuntimeError(
-                    "No valid rows after CSV parsing/normalization for claimed manifest batch. "
-                    "Please verify CSV header/format and parsing rules."
+                    "No supported Flexi or ICC input files in claimed manifest batch. "
+                    "Please verify manifest paths and file naming rules."
                 )
 
             # ── Step 3: Write processed Parquet ───────────────────────────────
+            if not cut_lineage_with_parquet:
+                df_flexi = df_flexi.persist(StorageLevel.MEMORY_AND_DISK)
+                df_icc = df_icc.persist(StorageLevel.MEMORY_AND_DISK)
+                logger.info("Reusing persisted clean dataframes for processed parquet and downstream writes")
+
             flexi_processed_path = f"{processed_base}/frt_flexi_raw/batch_id={batch_id}/"
             icc_processed_path = f"{processed_base}/frt_in_icc_raw/batch_id={batch_id}/"
             write_parquet_optimized(df_flexi, flexi_processed_path, "overwrite", processed_output_partitions)
             write_parquet_optimized(df_icc, icc_processed_path, "overwrite", processed_output_partitions)
 
-            # Read the silver boundary back to cut the raw CSV lineage before downstream actions.
-            df_flexi = read_parquet(spark, flexi_processed_path)
-            df_icc = read_parquet(spark, icc_processed_path)
+            if cut_lineage_with_parquet:
+                # Read the silver boundary back to cut the raw CSV lineage before downstream actions.
+                df_flexi = read_parquet(spark, flexi_processed_path)
+                df_icc = read_parquet(spark, icc_processed_path)
 
             # ── Step 4: Build and write staging tables ────────────────────────
-            # Persist staging dataframes to avoid re-computation and reduce shuffle/OOM risk
-            df_flexi_pg = process_flexi(df_flexi).persist(StorageLevel.MEMORY_AND_DISK)
-            df_icc_pg = process_icc(df_icc).persist(StorageLevel.MEMORY_AND_DISK)
+            df_flexi_pg = process_flexi(df_flexi)
+            df_icc_pg = process_icc(df_icc)
             logger.info("ICC staging dtypes=%s", df_icc_pg.dtypes)
 
             write_staging_table(df_flexi_pg, "public.stg_frt_flexi_raw", pg_url, jdbc_props, stg_write_mode, jdbc_batch_size, jdbc_num_partitions)
             write_staging_table(df_icc_pg, "public.stg_frt_in_icc_raw", pg_url, jdbc_props, stg_write_mode, jdbc_batch_size, jdbc_num_partitions)
-            # df_icc_pg is not used later; free its storage
-            df_icc_pg.unpersist()
 
             # ── Step 5: Build DWH dims + fact ─────────────────────────────────
             # persist() once — feeds dim_date, dim_call_type, fact, summary.
@@ -195,26 +198,23 @@ def main() -> None:
             ).persist(StorageLevel.MEMORY_AND_DISK)
 
             logger.info("df_flexi_daily persisted to MEMORY_AND_DISK (lazy materialization)")
-            # df_flexi_pg is no longer needed once df_flexi_daily is persisted
-            df_flexi_pg.unpersist()
-
             df_dim_date_candidates = build_dim_date(df_flexi_daily)
             df_dim_date_existing = read_jdbc_table(spark, "dwh.dim_date", pg_url, jdbc_props).select("date_key")
             df_dim_date_new = df_dim_date_candidates.join(df_dim_date_existing, "date_key", "left_anti")
             write_staging_table(df_dim_date_new, "dwh.dim_date", pg_url, jdbc_props, "append", jdbc_batch_size, jdbc_num_partitions)
 
             df_dim_call_type_candidates = build_dim_call_type(df_flexi_daily)
-            df_call_type_codes = df_dim_call_type_candidates.select("call_type_code").dropDuplicates(["call_type_code"])
-            call_type_codes = [r["call_type_code"] for r in df_call_type_codes.collect() if r["call_type_code"] is not None]
-            df_dim_call_type_existing = read_dim_call_type_subset(
-                spark, pg_url, jdbc_props, call_type_codes
-            ).persist(StorageLevel.MEMORY_AND_DISK)
+            df_dim_call_type_existing = read_jdbc_table(
+                spark, "dwh.dim_call_type", pg_url, jdbc_props
+            ).select("call_type_code")
             df_dim_call_type_new = df_dim_call_type_candidates.join(
-                df_dim_call_type_existing.select("call_type_code"), "call_type_code", "left_anti"
+                df_dim_call_type_existing, "call_type_code", "left_anti"
             )
             write_staging_table(df_dim_call_type_new, "dwh.dim_call_type", pg_url, jdbc_props, "append", jdbc_batch_size, jdbc_num_partitions)
 
-            df_dim_call_type_all = df_dim_call_type_existing.select("call_type_key", "call_type_code")
+            df_dim_call_type_all = read_jdbc_table(
+                spark, "dwh.dim_call_type", pg_url, jdbc_props
+            ).select("call_type_key", "call_type_code")
             df_fact_usage_daily = build_fact_usage_daily(df_flexi_daily, df_dim_call_type_all, call_type_broadcast_threshold)
             df_fact_usage_daily_curated = to_curated_fact(df_fact_usage_daily)
 
@@ -255,7 +255,9 @@ def main() -> None:
             )
 
             df_flexi_daily.unpersist()
-            df_dim_call_type_existing.unpersist()
+            if not cut_lineage_with_parquet:
+                df_flexi.unpersist()
+                df_icc.unpersist()
 
             # ── Step 7: Mark manifest success ─────────────────────────────────
             success_ids = [i for i in claimed_ids if i not in unknown_ids]

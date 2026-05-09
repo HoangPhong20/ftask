@@ -75,7 +75,7 @@ def build_spark() -> SparkSession:
         # ── Serialization ─────────────────────────────────────────────────────
         .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
         .config("spark.kryoserializer.buffer.max", "512m")
-        .config("spark.driver.maxResultSize", env("SPARK_DRIVER_MAX_RESULT_SIZE", "1g"))
+        .config("spark.driver.maxResultSize", env("SPARK_DRIVER_MAX_RESULT_SIZE", "512m"))
         # ── S3A / MinIO connection ────────────────────────────────────────────
         .config("spark.hadoop.fs.s3a.endpoint", minio_endpoint)
         .config("spark.hadoop.fs.s3a.access.key", minio_access_key)
@@ -107,12 +107,22 @@ def build_spark() -> SparkSession:
 
 
 def with_target_partitions(df: DataFrame, target_partitions: int) -> DataFrame:
-    """Always repartition to target — never coalesce.
+    """Tune DataFrame partitions at the write boundary.
 
-    JDBC write parallelism comes from DataFrame partitions. Repartition here
-    at the write boundary so earlier transforms do not add extra shuffles.
+    JDBC write parallelism comes from DataFrame partitions. Coalesce when
+    reducing partitions to avoid an unnecessary full shuffle; repartition only
+    when increasing write parallelism.
     """
-    return df.repartition(max(target_partitions, 1))
+    target = max(target_partitions, 1)
+    current = df.rdd.getNumPartitions()
+
+    if current > target:
+        return df.coalesce(target)
+
+    if current < target:
+        return df.repartition(target)
+
+    return df
 
 
 def read_parquet(spark: SparkSession, path: str) -> DataFrame:
