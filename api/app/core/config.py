@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     postgres_password: str = "123456"
     dashboard_cache_ttl_seconds: int = 60
     dashboard_cache_max_entries: int = 500
+    internal_api_key: str | None = None
+    cors_allow_origins: list[str] = ["http://localhost:3000", "http://localhost:5173"]
 
     model_config = SettingsConfigDict(
         env_file=".env",

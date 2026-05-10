@@ -2,7 +2,7 @@ from datetime import date
 from typing import Any
 
 from fastapi import HTTPException
-from sqlalchemy import Integer, MetaData, Table, and_, cast, desc, func, select
+from sqlalchemy import Integer, MetaData, Table, and_, cast, desc, func, literal, select
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import SQLAlchemyError
 

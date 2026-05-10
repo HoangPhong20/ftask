@@ -159,9 +159,10 @@ Current note: the curated daily fact and summary are built from Flexi records. I
 
 ## Prerequisites
 
-- Docker
-- Docker Compose
-- Python 3.10+ if running helper scripts from the host machine
+- Docker (Docker Desktop recommended)
+- Docker Compose v2
+- Python 3.10+ only required if you run helper scripts from the host (e.g. scripts/run_spark_job.py)
+- Note: Spark runs inside Docker containers; you do not need to install pyspark on the host to run the stack with Docker Compose.
 
 ## Run Order
 
@@ -185,21 +186,53 @@ git clone <repository-url>
 cd Nifi
 ```
 
-### 2. Configure Environment
+### 2. Python virtualenv (optional — needed only for local helper scripts)
+
+If you run scripts from the host (not strictly required for Docker-only runs), activate the repo virtualenv and install dependencies for the API/tools:
+
+PowerShell (Windows):
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+pip install -r api\requirements.txt
+```
+
+Bash (Linux / WSL):
+
+```bash
+source .venv/bin/activate
+pip install -r api/requirements.txt
+```
+
+Note: The repository's Python dependencies live in api/requirements.txt (there is no requirements.txt at the repo root).
+
+### Quick Start
+
+A minimal quick start to boot the stack and run a Spark job:
+
+PowerShell / Bash:
+
+```powershell
+docker compose up -d --build
+docker compose ps
+python scripts/run_spark_job.py
+```
+
+### 3. Configure Environment
 
 Review `.env` before starting the stack. Important settings include:
 
 ```text
 SPARK_SHUFFLE_PARTITIONS=16
-SPARK_DEFAULT_PARALLELISM=16
+SPARK_DEFAULT_PARALLELISM=8
 PROCESSED_OUTPUT_PARTITIONS=4
 CURATED_FACT_OUTPUT_PARTITIONS=4
 JDBC_NUM_PARTITIONS=4
-JDBC_BATCH_SIZE=20000
+JDBC_BATCH_SIZE=50000
 ENABLE_SALT_AGG=false
 ```
 
-### 3. Start Services
+### 4. Start Services
 
 ```bash
 docker compose up -d
@@ -374,6 +407,13 @@ s3a://datalake/processed/frt_in_icc_raw/batch_id=<batch_id>/
 | `JDBC_NUM_PARTITIONS` | DataFrame partitions before JDBC writes |
 | `JDBC_BATCH_SIZE` | PostgreSQL insert batch size |
 | `ENABLE_SALT_AGG` | Enables salted aggregation when aggregation keys are heavily skewed |
+
+### Required JARs (jars_spark)
+The Spark jobs require external jars for S3A and PostgreSQL. Place these in the jars_spark/ directory (or update your spark-submit jars list):
+
+- hadoop-aws-3.3.4.jar
+- aws-java-sdk-bundle-1.12.262.jar
+- postgresql-42.7.4.jar
 
 ## Why This Project Matters
 

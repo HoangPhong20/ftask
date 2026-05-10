@@ -1,7 +1,8 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
-from app.api.dependencies import usage_repository
+from app.api.dependencies import get_usage_repository
 from app.api.response import ok
+from app.repositories.usage_repository import UsageRepository
 from app.schemas import ApiResponse
 from app.services.usage_service import validate_ymd
 
@@ -16,10 +17,11 @@ def get_staging_flexi(
     limit: int = Query(50, ge=1, le=1000000),
     offset: int = Query(0, ge=0),
     include_total: bool = Query(False),
+    repo: UsageRepository = Depends(get_usage_repository),
 ):
     try:
         validate_ymd(year, month, day)
-        rows, total = usage_repository.get_staging_flexi(
+        rows, total = repo.get_staging_flexi(
             year=year,
             month=month,
             day=day,
@@ -46,9 +48,10 @@ def get_staging_flexi(
 def get_staging_icc(
     limit: int = Query(50, ge=1, le=1000000),
     offset: int = Query(0, ge=0),
+    repo: UsageRepository = Depends(get_usage_repository),
 ):
     try:
-        rows, total = usage_repository.get_staging_icc(limit=limit, offset=offset)
+        rows, total = repo.get_staging_icc(limit=limit, offset=offset)
         return ok(rows, total=total, limit=limit, offset=offset)
     except Exception as exc:
         raise HTTPException(500, f"staging_icc_error: {exc}") from exc

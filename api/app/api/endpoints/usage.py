@@ -1,8 +1,9 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
-from app.api.dependencies import usage_service
+from app.api.dependencies import get_usage_service
 from app.api.response import ok
 from app.schemas import ApiResponse
+from app.services.usage_service import UsageService
 
 router = APIRouter(prefix="/api/usage", tags=["Usage"])
 
@@ -16,9 +17,10 @@ def get_usage_daily(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     include_total: bool = Query(False),
+    service: UsageService = Depends(get_usage_service),
 ):
     try:
-        rows, total, date_from, date_to = usage_service.daily(
+        rows, total, date_from, date_to = service.daily(
             year=year,
             month=month,
             day=day,
