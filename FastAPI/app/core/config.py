@@ -9,6 +9,13 @@ class Settings(BaseSettings):
     postgres_db: str = "postgres"
     postgres_user: str = "postgres"
     postgres_password: str = "123456"
+    database_pool_size: int = 10
+    database_max_overflow: int = 20
+    database_pool_timeout_seconds: int = 30
+    database_pool_recycle_seconds: int = 1800
+    database_connect_max_retries: int = 30
+    database_connect_retry_initial_seconds: float = 2.0
+    database_connect_retry_max_seconds: float = 16.0
     dashboard_cache_ttl_seconds: int = 60
     dashboard_cache_max_entries: int = 500
     internal_api_key: str | None = None

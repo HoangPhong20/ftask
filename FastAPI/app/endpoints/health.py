@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.api.dependencies import get_usage_repository
-from app.api.response import ok
-from app.schemas import ApiResponse
+from app.dependencies import get_usage_repository
 from app.repositories.usage_repository import UsageRepository
+from app.response import ok
+from app.schemas import ApiResponse
 
 router = APIRouter(tags=["System"])
 

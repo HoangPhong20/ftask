@@ -5,7 +5,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from .api.router import api_router
+from .router import api_router
 from .core.config import get_settings
 from .core.database import wait_for_database
 
@@ -13,7 +13,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("api")
 settings = get_settings()
 
-
+# Lifespan function allows us to run startup code before the app starts accepting requests.
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     wait_for_database()

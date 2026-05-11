@@ -1,13 +1,15 @@
+import logging
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from app.api.dependencies import get_analytics_service
-from app.api.response import ok
+from app.dependencies import get_analytics_service
+from app.response import ok
 from app.schemas import ApiResponse
 from app.services.analytics_service import AnalyticsService
 
 router = APIRouter(prefix="/api/analytics", tags=["Analytics"])
+logger = logging.getLogger(__name__)
 
 
 @router.get("/metrics/usage-summary", response_model=ApiResponse)
@@ -29,7 +31,8 @@ def get_usage_summary(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(500, f"analytics_usage_summary_error: {exc}") from exc
+        logger.exception("Failed to fetch usage summary")
+        raise HTTPException(500, "Internal server error") from exc
 
 
 @router.get("/metrics/usage-trend", response_model=ApiResponse)
@@ -53,4 +56,5 @@ def get_usage_trend(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(500, f"analytics_usage_trend_error: {exc}") from exc
+        logger.exception("Failed to fetch usage trend")
+        raise HTTPException(500, "Internal server error") from exc

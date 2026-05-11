@@ -1,11 +1,14 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from app.api.dependencies import get_usage_service
-from app.api.response import ok
+from app.dependencies import get_usage_service
+from app.response import ok
 from app.schemas import ApiResponse
 from app.services.usage_service import UsageService
 
 router = APIRouter(prefix="/api/usage", tags=["Usage"])
+logger = logging.getLogger(__name__)
 
 
 @router.get("/daily", response_model=ApiResponse)
@@ -44,4 +47,5 @@ def get_usage_daily(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(500, f"usage_daily_error: {exc}") from exc
+        logger.exception("Failed to fetch daily usage")
+        raise HTTPException(500, "Internal server error") from exc

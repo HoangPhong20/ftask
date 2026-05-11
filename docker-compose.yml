@@ -224,7 +224,7 @@ services:
   # ── FastAPI ─────────────────────────────────────────────────────────────────
   api:
     build:
-      context: ./api
+      context: ./FastAPI
       dockerfile: Dockerfile
     image: nifi-api:local
     container_name: nifi-api
@@ -238,6 +238,14 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      DATABASE_POOL_SIZE: ${DATABASE_POOL_SIZE}
+      DATABASE_MAX_OVERFLOW: ${DATABASE_MAX_OVERFLOW}
+      DATABASE_POOL_TIMEOUT_SECONDS: ${DATABASE_POOL_TIMEOUT_SECONDS}
+      DATABASE_POOL_RECYCLE_SECONDS: ${DATABASE_POOL_RECYCLE_SECONDS}
+      DATABASE_CONNECT_MAX_RETRIES: ${DATABASE_CONNECT_MAX_RETRIES}
+      DATABASE_CONNECT_RETRY_INITIAL_SECONDS: ${DATABASE_CONNECT_RETRY_INITIAL_SECONDS}
+      DATABASE_CONNECT_RETRY_MAX_SECONDS: ${DATABASE_CONNECT_RETRY_MAX_SECONDS}
     ports:
       - "8000:8000"       # FastAPI → http://localhost:8000/docs
     healthcheck:

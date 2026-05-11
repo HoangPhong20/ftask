@@ -1,12 +1,15 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from app.api.dependencies import get_usage_repository
-from app.api.response import ok
+from app.dependencies import get_usage_repository
 from app.repositories.usage_repository import UsageRepository
+from app.response import ok
 from app.schemas import ApiResponse
 from app.services.usage_service import validate_ymd
 
 router = APIRouter(prefix="/internal/staging", tags=["Internal"])
+logger = logging.getLogger(__name__)
 
 
 @router.get("/flexi", response_model=ApiResponse)
@@ -41,7 +44,8 @@ def get_staging_flexi(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(500, f"staging_flexi_error: {exc}") from exc
+        logger.exception("Failed to fetch Flexi staging data")
+        raise HTTPException(500, "Internal server error") from exc
 
 
 @router.get("/icc", response_model=ApiResponse)
@@ -54,4 +58,5 @@ def get_staging_icc(
         rows, total = repo.get_staging_icc(limit=limit, offset=offset)
         return ok(rows, total=total, limit=limit, offset=offset)
     except Exception as exc:
-        raise HTTPException(500, f"staging_icc_error: {exc}") from exc
+        logger.exception("Failed to fetch ICC staging data")
+        raise HTTPException(500, "Internal server error") from exc
